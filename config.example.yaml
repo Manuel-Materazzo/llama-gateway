@@ -14,18 +14,30 @@ llamacpp:
 # MCP Servers hosted on the local node
 mcp_servers:
   - name: "filesystem"
-    backend_url: "http://10.10.0.3:8001"
+    backend_url: "http://10.10.0.2:8001"
     health_path: "/health"
-    static_tools:
+    tools:
       - name: "read_file"
-        description: "Read the contents of a file"
+        description: "Read the contents of a file in the allowed workspace"
         inputSchema:
           type: "object"
           properties:
             path:
               type: "string"
-              description: "Path to the file to read"
-          required: ["path"]
+              description: "Relative file path"
+            base_dir:
+              type: "string"
+              description: "Internal server directory"
+            auth_token:
+              type: "string"
+              description: "Internal service authentication token"
+          required: ["path", "base_dir", "auth_token"]
+        # Hidden fields are stripped from the schema exposed to LLM/clients,
+        # and their default values are automatically injected when the tool is proxied!
+        hidden_parameters:
+          base_dir: "/var/data/workspace"
+          auth_token: "internal-secret-token"
+
       - name: "write_file"
         description: "Write content to a file"
         inputSchema:
@@ -38,9 +50,9 @@ mcp_servers:
           required: ["path", "content"]
 
   - name: "browser"
-    backend_url: "http://10.10.0.3:8002"
+    backend_url: "http://10.10.0.2:8002"
     health_path: "/health"
-    static_tools:
+    tools:
       - name: "browse_url"
         description: "Fetch and render a webpage"
         inputSchema:

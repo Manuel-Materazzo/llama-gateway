@@ -21,12 +21,23 @@ class LlamaCppConfig(BaseModel):
     health_path: str = "/health"
 
 
+class MCPToolConfig(BaseModel):
+    """Configuration for an individual MCP tool with field hiding and default values."""
+    name: str
+    description: Optional[str] = None
+    inputSchema: Optional[Dict[str, Any]] = None
+    hidden_fields: List[str] = Field(default_factory=list)
+    hidden_parameters: Dict[str, Any] = Field(default_factory=dict)
+    defaults: Dict[str, Any] = Field(default_factory=dict)
+
+
 class MCPServerConfig(BaseModel):
     """Configuration for an MCP server."""
     name: str
     backend_url: str
     health_path: str = "/health"
     static_tools: List[Dict[str, Any]] = Field(default_factory=list)
+    tools: List[Dict[str, Any]] = Field(default_factory=list)
     static_discovery: Optional[Dict[str, Any]] = None
 
 

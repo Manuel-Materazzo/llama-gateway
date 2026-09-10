@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from gateway.config import AppConfig
+from gateway.mcp_transform import get_sanitized_server_tools
 
 logger = logging.getLogger("llama_gateway.discovery")
 
@@ -31,10 +32,11 @@ async def get_models(request: Request) -> Dict[str, Any]:
 
 @router.get("/mcp/{server_name}/discovery", tags=["MCP Discovery"])
 @router.get("/mcp/{server_name}/tools", tags=["MCP Discovery"])
+@router.get("/mcp/{server_name}/tools/list", tags=["MCP Discovery"])
 async def get_mcp_static_tools(server_name: str, request: Request) -> Dict[str, Any]:
     """
     Static discovery endpoint for MCP server tools.
-    Always returns 200 OK with the static schema from configuration.
+    Always returns 200 OK with the sanitized schema from configuration (hidden fields stripped).
     """
     config: AppConfig = request.app.state.config
     mcp_config = next((s for s in config.mcp_servers if s.name == server_name), None)
@@ -48,7 +50,8 @@ async def get_mcp_static_tools(server_name: str, request: Request) -> Dict[str, 
     if mcp_config.static_discovery:
         return mcp_config.static_discovery
 
+    sanitized_tools = get_sanitized_server_tools(mcp_config.model_dump())
     return {
         "server": server_name,
-        "tools": mcp_config.static_tools,
+        "tools": sanitized_tools,
     }

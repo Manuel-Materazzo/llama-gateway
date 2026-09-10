@@ -149,9 +149,10 @@ class ProxyHandler:
         backend_url: str,
         path: str,
         health_path: str = "/health",
+        override_body: Optional[bytes] = None,
     ) -> Response:
         """Forward an HTTP request to the target backend with wake-on-request."""
-        body_bytes = await request.body()
+        body_bytes = override_body if override_body is not None else await request.body()
         clean_backend = backend_url.rstrip("/")
         clean_path = path.lstrip("/")
         target_url = f"{clean_backend}/{clean_path}" if clean_path else clean_backend
