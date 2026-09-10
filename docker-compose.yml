@@ -1,0 +1,21 @@
+services:
+  llama-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llama-gateway:latest
+    container_name: llama-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - GATEWAY_CONFIG_PATH=/app/config.yaml
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/gateway/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

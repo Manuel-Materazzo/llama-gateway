@@ -1,0 +1,89 @@
+# ==============================================================================
+# Llama Gateway & Idle Watcher Configuration
+# ==============================================================================
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+# Backend llama.cpp server (local GPU node reached via WireGuard VPN)
+llamacpp:
+  backend_url: "http://10.10.0.3:8080"
+  health_path: "/health"
+
+# MCP Servers hosted on the local node
+mcp_servers:
+  - name: "filesystem"
+    backend_url: "http://10.10.0.3:8001"
+    health_path: "/health"
+    static_tools:
+      - name: "read_file"
+        description: "Read the contents of a file"
+        inputSchema:
+          type: "object"
+          properties:
+            path:
+              type: "string"
+              description: "Path to the file to read"
+          required: ["path"]
+      - name: "write_file"
+        description: "Write content to a file"
+        inputSchema:
+          type: "object"
+          properties:
+            path:
+              type: "string"
+            content:
+              type: "string"
+          required: ["path", "content"]
+
+  - name: "browser"
+    backend_url: "http://10.10.0.3:8002"
+    health_path: "/health"
+    static_tools:
+      - name: "browse_url"
+        description: "Fetch and render a webpage"
+        inputSchema:
+          type: "object"
+          properties:
+            url:
+              type: "string"
+          required: ["url"]
+
+# Static models list returned on GET /v1/models (always 200 OK for Open WebUI)
+models:
+  - id: "llama-3.3-70b-instruct"
+    object: "model"
+    created: 1700000000
+    owned_by: "local-gpu"
+  - id: "qwen-2.5-coder-32b"
+    object: "model"
+    created: 1700000000
+    owned_by: "local-gpu"
+
+# MQTT Wake-up configuration (used to trigger ESP32 relay to power on GPU node)
+mqtt:
+  host: "127.0.0.1"          # Mosquitto broker on cloud machine
+  port: 1883
+  username: "gateway_user"    # Optional MQTT username
+  password: "secretpassword"  # Optional MQTT password
+  use_tls: false
+  topic: "home/node/wake"     # Topic monitored by ESP32
+  payload: "wake"             # Payload sent to trigger boot
+  qos: 1
+
+# Wake-on-request polling and timeout settings
+wake:
+  health_check_timeout: 1.5   # Seconds for fast health probe
+  polling_interval: 2.0       # Seconds between reachability checks during wake-up
+  max_timeout: 120.0          # Max seconds to wait for boot before returning HTTP 503
+  keep_alive_interval: 5.0    # Seconds between SSE keep-alive comments (: keep-alive\n\n)
+
+# Idle Watcher configuration (runs on local GPU node)
+watcher:
+  gateway_url: "http://10.10.0.1:8000"   # Gateway IP/port accessible via WireGuard
+  poll_interval: 60.0                    # Seconds between gateway status checks
+  inactivity_threshold: 600.0            # Seconds of inactivity before shutdown (10 min)
+  grace_period: 120.0                    # Seconds post-boot where poweroff is never executed (2 min)
+  shutdown_command: "systemctl poweroff" # Command executed to power off local machine
+  dry_run: true                         # Set true to simulate without powering off

@@ -1,0 +1,24 @@
+[Unit]
+Description=Llama Gateway - Wake-on-Request Proxy for Local AI Node
+After=network.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gateway
+Group=gateway
+WorkingDirectory=/opt/llama-gateway
+Environment="GATEWAY_CONFIG_PATH=/etc/llama-gateway/config.yaml"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/llama-gateway/.venv/bin/python -m gateway.main
+Restart=always
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

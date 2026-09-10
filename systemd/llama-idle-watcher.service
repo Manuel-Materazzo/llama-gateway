@@ -1,0 +1,17 @@
+[Unit]
+Description=Llama Idle Watcher - Automatic Shutdown Service
+After=network.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama-gateway
+Environment="WATCHER_CONFIG_PATH=/etc/llama-gateway/config.yaml"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/llama-gateway/.venv/bin/python -m watcher.idle_watcher
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
