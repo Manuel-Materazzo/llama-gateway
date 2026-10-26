@@ -40,7 +40,18 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         logger.info("Configured llamacpp backend: %s", config.llamacpp.backend_url)
         logger.info("Configured MCP servers: %d", len(config.mcp_servers))
         logger.info("Configured static models: %d", len(config.models))
-        logger.info("MQTT wake broker: %s:%d (topic=%s)", config.mqtt.host, config.mqtt.port, config.mqtt.topic)
+        logger.info(
+            "MQTT wake broker: %s:%d (topic=%s, tls=%s)",
+            config.mqtt.host,
+            config.mqtt.port,
+            config.mqtt.topic,
+            config.mqtt.use_tls,
+        )
+        if config.mqtt.port == 8883 and not config.mqtt.use_tls:
+            logger.warning(
+                "WARNING: MQTT broker port is 8883 (standard TLS port) but use_tls is False. "
+                "If your broker requires TLS, set 'use_tls: true' in config.yaml."
+            )
         yield
         logger.info("Shutting down Llama Gateway...")
         await wake_manager.close()

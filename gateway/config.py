@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ServerConfig(BaseModel):
@@ -59,9 +59,32 @@ class MQTTConfig(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     use_tls: bool = False
+    tls_ca_cert: Optional[str] = None
+    tls_certfile: Optional[str] = None
+    tls_keyfile: Optional[str] = None
+    tls_insecure: bool = False
     topic: str = "home/node/wake"
     payload: str = "wake"
     qos: int = 1
+    timeout: float = 5.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_tls_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "ca_certs" in d and "tls_ca_cert" not in d:
+                d["tls_ca_cert"] = d["ca_certs"]
+            elif "ca_cert" in d and "tls_ca_cert" not in d:
+                d["tls_ca_cert"] = d["ca_cert"]
+            if "insecure" in d and "tls_insecure" not in d:
+                d["tls_insecure"] = d["insecure"]
+            if "certfile" in d and "tls_certfile" not in d:
+                d["tls_certfile"] = d["certfile"]
+            if "keyfile" in d and "tls_keyfile" not in d:
+                d["tls_keyfile"] = d["keyfile"]
+            return d
+        return data
 
 
 class WakeConfig(BaseModel):

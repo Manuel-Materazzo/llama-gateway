@@ -53,3 +53,27 @@ def test_yaml_config_loading(tmp_path: Path):
     watcher_cfg = load_watcher_config(str(config_file))
     assert watcher_cfg.inactivity_threshold == 300.0
     assert watcher_cfg.grace_period == 60.0
+
+
+def test_mqtt_tls_config_and_aliases(tmp_path: Path):
+    """Verify MQTT TLS options and alias support."""
+    test_yaml = {
+        "mqtt": {
+            "host": "broker.local",
+            "port": 8883,
+            "use_tls": True,
+            "ca_certs": "/path/to/ca.crt",
+            "insecure": True,
+            "timeout": 2.5,
+        }
+    }
+    config_file = tmp_path / "test_mqtt_tls.yaml"
+    with open(config_file, "w", encoding="utf-8") as f:
+        yaml.safe_dump(test_yaml, f)
+
+    loaded = load_config(str(config_file))
+    assert loaded.mqtt.port == 8883
+    assert loaded.mqtt.use_tls is True
+    assert loaded.mqtt.tls_ca_cert == "/path/to/ca.crt"
+    assert loaded.mqtt.tls_insecure is True
+    assert loaded.mqtt.timeout == 2.5

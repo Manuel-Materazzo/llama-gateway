@@ -62,7 +62,7 @@ class WakeManager:
             for url, session in self._active_sessions.items()
         }
 
-        return {
+        status_dict = {
             "status": "ok",
             "current_time": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "last_activity_timestamp": self.last_activity,
@@ -72,6 +72,10 @@ class WakeManager:
             "active_wakes": active_wakes,
             "configured_backends": backends,
         }
+        if self.mqtt_publisher.last_error:
+            status_dict["last_mqtt_error"] = self.mqtt_publisher.last_error
+
+        return status_dict
 
     async def check_health(self, backend_url: str, health_path: str = "/health") -> bool:
         """Check if backend is reachable with a fast timeout."""
@@ -129,8 +133,9 @@ class WakeManager:
             elapsed,
         )
         session.success = False
+        mqtt_err_suffix = f" (MQTT wake publish error: {self.mqtt_publisher.last_error})" if self.mqtt_publisher.last_error else ""
         session.error_message = (
-            f"Backend node at {backend_url} did not respond within {self.wake_config.max_timeout}s."
+            f"Backend node at {backend_url} did not respond within {self.wake_config.max_timeout}s{mqtt_err_suffix}."
         )
         session.event.set()
         async with self._lock:
@@ -170,7 +175,12 @@ class WakeManager:
             logger.info("Publishing MQTT wake signal for backend: %s", backend_url)
             mqtt_published = await self.mqtt_publisher.publish_wake()
             if not mqtt_published:
-                logger.warning("MQTT wake signal publish returned failure; polling will still proceed in case node is booting.")
+                err_detail = self.mqtt_publisher.last_error or "Unknown MQTT error"
+                logger.error(
+                    "MQTT wake signal publish FAILED for backend %s: %s; polling will proceed in case node is already powering on.",
+                    backend_url,
+                    err_detail,
+                )
 
             # Launch polling background task
             asyncio.create_task(self._poll_until_ready(backend_url, health_path, session))

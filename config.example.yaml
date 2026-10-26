@@ -76,13 +76,18 @@ models:
 # MQTT Wake-up configuration (used to trigger ESP32 relay to power on GPU node)
 mqtt:
   host: "127.0.0.1"          # Mosquitto broker on cloud machine
-  port: 1883
+  port: 1883                 # 1883 for plaintext, 8883 for TLS
   username: "gateway_user"    # Optional MQTT username
   password: "secretpassword"  # Optional MQTT password
-  use_tls: false
+  use_tls: false              # Set to true if broker uses TLS (e.g. port 8883)
+  tls_ca_cert: null           # Optional: path to custom CA certificate file (e.g. "/etc/ssl/certs/ca.crt")
+  tls_certfile: null          # Optional: client certificate for mTLS
+  tls_keyfile: null           # Optional: client private key for mTLS
+  tls_insecure: false         # Set to true to bypass cert/hostname verification (for self-signed certs)
   topic: "home/node/wake"     # Topic monitored by ESP32
   payload: "wake"             # Payload sent to trigger boot
-  qos: 1
+  qos: 1                      # QoS level (0 or 1)
+  timeout: 5.0                # Seconds to wait for publish confirmation
 
 # Wake-on-request polling and timeout settings
 wake:
