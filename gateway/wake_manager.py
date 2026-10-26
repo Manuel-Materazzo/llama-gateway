@@ -6,10 +6,10 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import httpx
 
-from gateway.config import MQTTConfig, WakeConfig
+from gateway.config import AutoShutdownConfig, MQTTConfig, WakeConfig
 from gateway.mqtt_client import MQTTPublisher
 
 logger = logging.getLogger("llama_gateway.wake_manager")
@@ -29,10 +29,23 @@ class BackendWakeSession:
 class WakeManager:
     """Coordinates backend wake-up, health checking, debouncing, and activity tracking."""
 
-    def __init__(self, wake_config: WakeConfig, mqtt_config: MQTTConfig) -> None:
+    def __init__(
+        self,
+        wake_config: WakeConfig,
+        mqtt_config: MQTTConfig,
+        auto_shutdown_config: Optional[AutoShutdownConfig] = None,
+        monitored_backends: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
         self.wake_config = wake_config
+        self.mqtt_config = mqtt_config
+        self.auto_shutdown_config = auto_shutdown_config
+        self.monitored_backends = monitored_backends or []
         self.mqtt_publisher = MQTTPublisher(mqtt_config)
+        self.start_time: float = time.time()
         self.last_activity: float = time.time()
+        self.last_wake_time: Optional[float] = None
+        self.last_shutdown_time: Optional[float] = None
+        self._shutdown_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._active_sessions: Dict[str, BackendWakeSession] = {}
         self._http_client = httpx.AsyncClient(
@@ -40,7 +53,8 @@ class WakeManager:
         )
 
     async def close(self) -> None:
-        """Close underlying HTTP client."""
+        """Stop background tasks and close underlying HTTP client."""
+        await self.stop_auto_shutdown_task()
         await self._http_client.aclose()
 
     def record_activity(self) -> None:
@@ -72,6 +86,13 @@ class WakeManager:
             "active_wakes": active_wakes,
             "configured_backends": backends,
         }
+        if self.auto_shutdown_config:
+            status_dict["auto_shutdown"] = {
+                "enabled": self.auto_shutdown_config.enabled,
+                "inactivity_threshold": self.auto_shutdown_config.inactivity_threshold,
+                "grace_period": self.auto_shutdown_config.grace_period,
+                "last_shutdown_timestamp": self.last_shutdown_time,
+            }
         if self.mqtt_publisher.last_error:
             status_dict["last_mqtt_error"] = self.mqtt_publisher.last_error
 
@@ -189,6 +210,147 @@ class WakeManager:
         await session.event.wait()
 
         if session.success:
+            self.last_wake_time = time.time()
+            self.last_activity = time.time()
             return True, None
         else:
             return False, session.error_message or "Node wake-up timed out."
+
+    async def is_node_alive(self) -> bool:
+        """Check if any monitored backend is reachable."""
+        if not self.monitored_backends:
+            return False
+        tasks = [
+            self.check_health(backend_url, health_path)
+            for backend_url, health_path in self.monitored_backends
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return any(res is True for res in results)
+
+    async def check_and_trigger_auto_shutdown(self) -> bool:
+        """
+        Check if the node has been idle for >= inactivity_threshold and is currently online.
+        If so, trigger shutdown via MQTT.
+        Returns True if shutdown command was published, False otherwise.
+        """
+        if not self.auto_shutdown_config or not self.auto_shutdown_config.enabled:
+            return False
+
+        now = time.time()
+
+        # 1. Check if a wake-up session is currently in flight
+        async with self._lock:
+            if len(self._active_sessions) > 0:
+                logger.debug("Auto-shutdown: wake-up in progress, skipping check.")
+                return False
+
+        # 2. Check startup / post-wake grace period
+        if now - self.start_time < self.auto_shutdown_config.grace_period:
+            logger.debug(
+                "Auto-shutdown: within startup grace period (%.1fs remaining).",
+                self.auto_shutdown_config.grace_period - (now - self.start_time),
+            )
+            return False
+
+        if self.last_wake_time is not None:
+            if now - self.last_wake_time < self.auto_shutdown_config.grace_period:
+                logger.debug(
+                    "Auto-shutdown: within post-wake grace period (%.1fs remaining).",
+                    self.auto_shutdown_config.grace_period - (now - self.last_wake_time),
+                )
+                return False
+
+        # 3. Check post-shutdown cooldown
+        if self.last_shutdown_time is not None:
+            if now - self.last_shutdown_time < self.auto_shutdown_config.grace_period:
+                logger.debug(
+                    "Auto-shutdown: within post-shutdown cooldown (%.1fs remaining).",
+                    self.auto_shutdown_config.grace_period - (now - self.last_shutdown_time),
+                )
+                return False
+
+        # 4. Check inactivity threshold
+        inactivity = now - self.last_activity
+        if inactivity < self.auto_shutdown_config.inactivity_threshold:
+            logger.debug(
+                "Auto-shutdown: idle for %.1fs / %.1fs threshold.",
+                inactivity,
+                self.auto_shutdown_config.inactivity_threshold,
+            )
+            return False
+
+        # 5. Inactivity threshold exceeded! Verify if the node is ACTUALLY ALIVE.
+        # CRITICAL: Because sending the MQTT message toggles power, sending it when the node
+        # is already OFF would inadvertently turn it ON.
+        is_alive = await self.is_node_alive()
+        if not is_alive:
+            logger.debug("Auto-shutdown: node is already offline; no action taken.")
+            return False
+
+        # 6. Node is online and idle threshold exceeded -> publish shutdown signal!
+        topic = self.auto_shutdown_config.topic or self.mqtt_config.topic
+        payload = self.auto_shutdown_config.payload or self.mqtt_config.payload
+
+        logger.warning(
+            "INACTIVITY THRESHOLD EXCEEDED (idle for %.1fs >= %.1fs)! Node is online. "
+            "Publishing auto-shutdown MQTT command to topic '%s'...",
+            inactivity,
+            self.auto_shutdown_config.inactivity_threshold,
+            topic,
+        )
+
+        success = await self.mqtt_publisher.publish_shutdown(
+            topic=topic,
+            payload=payload,
+        )
+
+        if success:
+            self.last_shutdown_time = time.time()
+            self.last_activity = time.time()
+            logger.info("Auto-shutdown MQTT signal published successfully.")
+            return True
+        else:
+            logger.error(
+                "Failed to publish auto-shutdown MQTT signal: %s",
+                self.mqtt_publisher.last_error,
+            )
+            return False
+
+    async def start_auto_shutdown_task(self) -> None:
+        """Start background task for monitoring idle state and triggering auto-shutdown."""
+        if self.auto_shutdown_config and self.auto_shutdown_config.enabled:
+            if self._shutdown_task is None or self._shutdown_task.done():
+                self._shutdown_task = asyncio.create_task(self._auto_shutdown_loop())
+
+    async def stop_auto_shutdown_task(self) -> None:
+        """Cancel and await termination of the background auto-shutdown task."""
+        if self._shutdown_task and not self._shutdown_task.done():
+            self._shutdown_task.cancel()
+            try:
+                await self._shutdown_task
+            except asyncio.CancelledError:
+                pass
+            self._shutdown_task = None
+
+    async def _auto_shutdown_loop(self) -> None:
+        """Background periodic loop checking for inactivity."""
+        interval = (
+            self.auto_shutdown_config.check_interval
+            if self.auto_shutdown_config
+            else 30.0
+        )
+        logger.info(
+            "Auto-shutdown background monitor started (check_interval=%.1fs, threshold=%.1fs, grace_period=%.1fs)",
+            interval,
+            self.auto_shutdown_config.inactivity_threshold if self.auto_shutdown_config else 0,
+            self.auto_shutdown_config.grace_period if self.auto_shutdown_config else 0,
+        )
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self.check_and_trigger_auto_shutdown()
+            except asyncio.CancelledError:
+                logger.info("Auto-shutdown background monitor stopped.")
+                break
+            except Exception as e:
+                logger.error("Unhandled error in auto-shutdown loop: %s", e, exc_info=True)

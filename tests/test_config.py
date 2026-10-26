@@ -15,6 +15,8 @@ def test_default_config_loading():
     assert cfg.server.host == "0.0.0.0"
     assert cfg.server.port == 8000
     assert cfg.wake.max_timeout == 120.0
+    assert cfg.auto_shutdown.enabled is True
+    assert cfg.auto_shutdown.inactivity_threshold == 600.0
     assert cfg.watcher.inactivity_threshold == 600.0
 
 
@@ -33,6 +35,14 @@ def test_yaml_config_loading(tmp_path: Path):
         ],
         "mqtt": {"host": "mqtt.test.local", "topic": "test/wake", "payload": "START"},
         "wake": {"polling_interval": 1.0, "max_timeout": 30.0},
+        "auto_shutdown": {
+            "enabled": True,
+            "inactivity_threshold": 300.0,
+            "check_interval": 15.0,
+            "grace_period": 60.0,
+            "topic": "test/shutdown",
+            "payload": "STOP",
+        },
         "watcher": {"inactivity_threshold": 300.0, "grace_period": 60.0},
     }
 
@@ -48,6 +58,10 @@ def test_yaml_config_loading(tmp_path: Path):
     assert loaded.mcp_servers[0].name == "test_tools"
     assert loaded.mqtt.payload == "START"
     assert loaded.wake.max_timeout == 30.0
+    assert loaded.auto_shutdown.inactivity_threshold == 300.0
+    assert loaded.auto_shutdown.check_interval == 15.0
+    assert loaded.auto_shutdown.topic == "test/shutdown"
+    assert loaded.auto_shutdown.payload == "STOP"
     assert loaded.watcher.inactivity_threshold == 300.0
 
     watcher_cfg = load_watcher_config(str(config_file))

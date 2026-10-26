@@ -95,6 +95,16 @@ class WakeConfig(BaseModel):
     keep_alive_interval: float = 5.0
 
 
+class AutoShutdownConfig(BaseModel):
+    """Configuration for automated idle shutdown triggered directly by the Gateway via MQTT."""
+    enabled: bool = True
+    inactivity_threshold: float = 600.0  # 10 minutes
+    check_interval: float = 30.0         # 30 seconds
+    grace_period: float = 120.0          # 2 minutes
+    topic: Optional[str] = None          # Custom topic; falls back to mqtt.topic if None
+    payload: Optional[str] = None        # Custom payload; falls back to mqtt.payload if None
+
+
 class IdleWatcherConfig(BaseModel):
     """Configuration for the local node Idle Watcher."""
     gateway_url: str = "http://127.0.0.1:8000"
@@ -113,6 +123,7 @@ class AppConfig(BaseModel):
     models: List[StaticModelConfig] = Field(default_factory=list)
     mqtt: MQTTConfig = Field(default_factory=MQTTConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
+    auto_shutdown: AutoShutdownConfig = Field(default_factory=AutoShutdownConfig)
     watcher: IdleWatcherConfig = Field(default_factory=IdleWatcherConfig)
 
 

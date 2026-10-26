@@ -96,7 +96,18 @@ wake:
   max_timeout: 120.0          # Max seconds to wait for boot before returning HTTP 503
   keep_alive_interval: 5.0    # Seconds between SSE keep-alive comments (: keep-alive\n\n)
 
-# Idle Watcher configuration (runs on local GPU node)
+# Auto-shutdown configuration (managed directly by the Gateway in cloud, zero-install on GPU node)
+# Automatically publishes an MQTT message to shut down the node after inactivity.
+auto_shutdown:
+  enabled: true                          # Enable Gateway-managed automatic shutdown
+  inactivity_threshold: 600.0            # Seconds of inactivity before shutdown (10 min)
+  check_interval: 30.0                   # Seconds between inactivity checks
+  grace_period: 120.0                    # Seconds post-boot/startup where shutdown is never triggered (2 min)
+  topic: null                            # Optional: custom MQTT topic (defaults to mqtt.topic if null)
+  payload: null                          # Optional: custom MQTT payload (defaults to mqtt.payload if null)
+
+# Legacy Idle Watcher configuration (optional daemon that runs locally on GPU node)
+# Not needed if using auto_shutdown via MQTT above.
 watcher:
   gateway_url: "http://10.10.0.1:8000"   # Gateway IP/port accessible via WireGuard
   poll_interval: 60.0                    # Seconds between gateway status checks

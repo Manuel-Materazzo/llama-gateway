@@ -22,15 +22,24 @@ class MQTTPublisher:
         self.config = config
         self.last_error: Optional[str] = None
 
-    def _publish_sync(self) -> bool:
-        """Synchronously connects and publishes a single wake message."""
+    def _publish_sync(
+        self,
+        topic: Optional[str] = None,
+        payload: Optional[str] = None,
+        action_name: str = "wake",
+    ) -> bool:
+        """Synchronously connects and publishes an MQTT message."""
         self.last_error = None
+        target_topic = topic or self.config.topic
+        target_payload = payload or self.config.payload
+
         logger.info(
-            "Publishing wake command to MQTT broker at %s:%d (topic=%s, payload=%s, tls=%s)",
+            "Publishing %s command to MQTT broker at %s:%d (topic=%s, payload=%s, tls=%s)",
+            action_name,
             self.config.host,
             self.config.port,
-            self.config.topic,
-            self.config.payload,
+            target_topic,
+            target_payload,
             self.config.use_tls,
         )
 
@@ -127,8 +136,8 @@ class MQTTPublisher:
             client.loop_start()
 
             msg_info = client.publish(
-                topic=self.config.topic,
-                payload=self.config.payload,
+                topic=target_topic,
+                payload=target_payload,
                 qos=self.config.qos,
             )
 
@@ -139,21 +148,21 @@ class MQTTPublisher:
             if not state["published"] and not msg_info.is_published():
                 if not self.config.use_tls and self.config.port == 8883:
                     err = (
-                        "Failed to publish wake message: broker disconnected client. "
+                        f"Failed to publish {action_name} message: broker disconnected client. "
                         "Port is 8883 (standard TLS port) but use_tls is False. "
                         "Broker likely aborted with 'OpenSSL Error: wrong version number'. "
                         "Enable 'use_tls: true' in config.yaml."
                     )
                 elif state["errors"]:
-                    err = f"Failed to publish wake message: {'; '.join(state['errors'])}"
+                    err = f"Failed to publish {action_name} message: {'; '.join(state['errors'])}"
                 else:
-                    err = f"Failed to publish wake message: timed out after {timeout}s without publish confirmation"
+                    err = f"Failed to publish {action_name} message: timed out after {timeout}s without publish confirmation"
 
                 logger.error(err)
                 self.last_error = err
                 return False
 
-            logger.info("Wake command successfully published to MQTT topic '%s'", self.config.topic)
+            logger.info("%s command successfully published to MQTT topic '%s'", action_name.capitalize(), target_topic)
             return True
 
         except ssl.SSLCertVerificationError as e:
@@ -176,7 +185,7 @@ class MQTTPublisher:
             self.last_error = err
             return False
         except Exception as e:
-            err = f"Failed to publish MQTT wake command: {e}"
+            err = f"Failed to publish MQTT {action_name} command: {e}"
             logger.error(err, exc_info=True)
             self.last_error = err
             return False
@@ -188,6 +197,23 @@ class MQTTPublisher:
                 except Exception:
                     pass
 
+    async def publish_message(
+        self,
+        topic: Optional[str] = None,
+        payload: Optional[str] = None,
+        action_name: str = "wake",
+    ) -> bool:
+        """Asynchronously publishes an MQTT message in a worker thread."""
+        return await asyncio.to_thread(self._publish_sync, topic, payload, action_name)
+
     async def publish_wake(self) -> bool:
         """Asynchronously publishes the wake message in a worker thread."""
-        return await asyncio.to_thread(self._publish_sync)
+        return await self.publish_message(action_name="wake")
+
+    async def publish_shutdown(
+        self,
+        topic: Optional[str] = None,
+        payload: Optional[str] = None,
+    ) -> bool:
+        """Asynchronously publishes the shutdown message in a worker thread."""
+        return await self.publish_message(topic=topic, payload=payload, action_name="shutdown")

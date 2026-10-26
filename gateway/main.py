@@ -31,7 +31,17 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     if config is None:
         config = load_config()
 
-    wake_manager = WakeManager(wake_config=config.wake, mqtt_config=config.mqtt)
+    backends = [
+        (config.llamacpp.backend_url, config.llamacpp.health_path),
+        *[(mcp.backend_url, mcp.health_path) for mcp in config.mcp_servers],
+    ]
+
+    wake_manager = WakeManager(
+        wake_config=config.wake,
+        mqtt_config=config.mqtt,
+        auto_shutdown_config=config.auto_shutdown,
+        monitored_backends=backends,
+    )
     proxy_handler = ProxyHandler(wake_manager=wake_manager)
 
     @asynccontextmanager
@@ -47,6 +57,17 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             config.mqtt.topic,
             config.mqtt.use_tls,
         )
+        if config.auto_shutdown.enabled:
+            logger.info(
+                "Auto-shutdown enabled: inactivity_threshold=%.1fs, check_interval=%.1fs, grace_period=%.1fs",
+                config.auto_shutdown.inactivity_threshold,
+                config.auto_shutdown.check_interval,
+                config.auto_shutdown.grace_period,
+            )
+            await wake_manager.start_auto_shutdown_task()
+        else:
+            logger.info("Auto-shutdown is disabled.")
+
         if config.mqtt.port == 8883 and not config.mqtt.use_tls:
             logger.warning(
                 "WARNING: MQTT broker port is 8883 (standard TLS port) but use_tls is False. "
