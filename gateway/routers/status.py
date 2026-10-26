@@ -41,9 +41,15 @@ async def get_gateway_status(request: Request) -> Dict[str, Any]:
         config.llamacpp.health_path,
     )
     for mcp in config.mcp_servers:
+        mcp_headers = None
+        if mcp.bearer_token:
+            token = mcp.bearer_token.strip()
+            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            mcp_headers = {"Authorization": auth_val}
         health_tasks[f"mcp_{mcp.name}"] = wake_manager.check_health(
             mcp.backend_url,
             mcp.health_path,
+            headers=mcp_headers,
         )
 
     results = await asyncio.gather(*health_tasks.values(), return_exceptions=True)

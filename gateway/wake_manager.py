@@ -34,7 +34,7 @@ class WakeManager:
         wake_config: WakeConfig,
         mqtt_config: MQTTConfig,
         auto_shutdown_config: Optional[AutoShutdownConfig] = None,
-        monitored_backends: Optional[List[Tuple[str, str]]] = None,
+        monitored_backends: Optional[List[Tuple[str, ...]]] = None,
     ) -> None:
         self.wake_config = wake_config
         self.mqtt_config = mqtt_config
@@ -98,7 +98,12 @@ class WakeManager:
 
         return status_dict
 
-    async def check_health(self, backend_url: str, health_path: str = "/health") -> bool:
+    async def check_health(
+        self,
+        backend_url: str,
+        health_path: str = "/health",
+        headers: Optional[Dict[str, str]] = None,
+    ) -> bool:
         """Check if backend is reachable with a fast timeout."""
         clean_url = backend_url.rstrip("/")
         clean_path = health_path.lstrip("/")
@@ -107,6 +112,7 @@ class WakeManager:
         try:
             response = await self._http_client.get(
                 full_url,
+                headers=headers,
                 timeout=self.wake_config.health_check_timeout,
             )
             # Accept any 2xx, 3xx, or 4xx as proof that the server process is alive and accepting connections
@@ -125,6 +131,7 @@ class WakeManager:
         backend_url: str,
         health_path: str,
         session: BackendWakeSession,
+        headers: Optional[Dict[str, str]] = None,
     ) -> None:
         """Background worker that polls backend until healthy or max timeout expires."""
         logger.info(
@@ -137,7 +144,11 @@ class WakeManager:
         start = time.time()
         while time.time() - start < self.wake_config.max_timeout:
             await asyncio.sleep(self.wake_config.polling_interval)
-            healthy = await self.check_health(backend_url, health_path)
+            healthy = await (
+                self.check_health(backend_url, health_path, headers=headers)
+                if headers is not None
+                else self.check_health(backend_url, health_path)
+            )
             if healthy:
                 elapsed = time.time() - start
                 logger.info("Backend %s is now REACHABLE after %.2f seconds", backend_url, elapsed)
@@ -166,6 +177,7 @@ class WakeManager:
         self,
         backend_url: str,
         health_path: str = "/health",
+        headers: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, Optional[str]]:
         """
         Ensure the backend is reachable.
@@ -173,7 +185,12 @@ class WakeManager:
         Returns (success, error_message).
         """
         # 1. Fast path: check if backend is already healthy
-        if await self.check_health(backend_url, health_path):
+        is_healthy = await (
+            self.check_health(backend_url, health_path, headers=headers)
+            if headers is not None
+            else self.check_health(backend_url, health_path)
+        )
+        if is_healthy:
             return True, None
 
         logger.info("Backend %s is not reachable. Initiating wake-on-request flow...", backend_url)
@@ -204,7 +221,7 @@ class WakeManager:
                 )
 
             # Launch polling background task
-            asyncio.create_task(self._poll_until_ready(backend_url, health_path, session))
+            asyncio.create_task(self._poll_until_ready(backend_url, health_path, session, headers=headers))
 
         # 3. Await completion of the wake session
         await session.event.wait()
@@ -220,10 +237,12 @@ class WakeManager:
         """Check if any monitored backend is reachable."""
         if not self.monitored_backends:
             return False
-        tasks = [
-            self.check_health(backend_url, health_path)
-            for backend_url, health_path in self.monitored_backends
-        ]
+        tasks = []
+        for item in self.monitored_backends:
+            backend_url = item[0]
+            health_path = item[1]
+            headers = item[2] if len(item) > 2 else None
+            tasks.append(self.check_health(backend_url, health_path, headers=headers))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return any(res is True for res in results)
 

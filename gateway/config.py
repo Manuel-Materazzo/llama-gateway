@@ -35,10 +35,23 @@ class MCPServerConfig(BaseModel):
     """Configuration for an MCP server."""
     name: str
     backend_url: str
+    bearer_token: Optional[str] = None
     health_path: str = "/health"
     static_tools: List[Dict[str, Any]] = Field(default_factory=list)
     tools: List[Dict[str, Any]] = Field(default_factory=list)
     static_discovery: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_token_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "token" in d and "bearer_token" not in d:
+                d["bearer_token"] = d["token"]
+            elif "auth_token" in d and "bearer_token" not in d:
+                d["bearer_token"] = d["auth_token"]
+            return d
+        return data
 
 
 class StaticModelConfig(BaseModel):

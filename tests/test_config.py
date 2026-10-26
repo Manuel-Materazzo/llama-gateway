@@ -91,3 +91,36 @@ def test_mqtt_tls_config_and_aliases(tmp_path: Path):
     assert loaded.mqtt.tls_ca_cert == "/path/to/ca.crt"
     assert loaded.mqtt.tls_insecure is True
     assert loaded.mqtt.timeout == 2.5
+
+
+def test_mcp_bearer_token_config_and_aliases(tmp_path: Path):
+    """Verify MCP server bearer_token configuration and alias support (token, auth_token)."""
+    test_yaml = {
+        "mcp_servers": [
+            {
+                "name": "srv1",
+                "backend_url": "http://10.10.0.2:8001",
+                "bearer_token": "secret-token-1",
+            },
+            {
+                "name": "srv2",
+                "backend_url": "http://10.10.0.2:8002",
+                "token": "secret-token-2",
+            },
+            {
+                "name": "srv3",
+                "backend_url": "http://10.10.0.2:8003",
+                "auth_token": "secret-token-3",
+            },
+        ]
+    }
+    config_file = tmp_path / "test_mcp_auth.yaml"
+    with open(config_file, "w", encoding="utf-8") as f:
+        yaml.safe_dump(test_yaml, f)
+
+    loaded = load_config(str(config_file))
+    assert len(loaded.mcp_servers) == 3
+    assert loaded.mcp_servers[0].bearer_token == "secret-token-1"
+    assert loaded.mcp_servers[1].bearer_token == "secret-token-2"
+    assert loaded.mcp_servers[2].bearer_token == "secret-token-3"
+

@@ -75,10 +75,17 @@ async def proxy_mcp_request(server_name: str, path: str, request: Request) -> Re
     path_tool_name = extract_tool_name_from_path(path)
     transformed_body = transform_mcp_payload(server_dict, body_bytes, path_tool_name=path_tool_name)
 
+    extra_headers: Dict[str, str] = {}
+    if mcp_config.bearer_token:
+        token = mcp_config.bearer_token.strip()
+        auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        extra_headers["Authorization"] = auth_val
+
     return await proxy_handler.forward_request(
         request=request,
         backend_url=mcp_config.backend_url,
         path=f"/{path.lstrip('/')}" if path else "/",
         health_path=mcp_config.health_path,
         override_body=transformed_body,
+        extra_headers=extra_headers if extra_headers else None,
     )

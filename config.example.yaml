@@ -16,6 +16,7 @@ mcp_servers:
   - name: "filesystem"
     backend_url: "http://10.10.0.2:8001"
     health_path: "/health"
+    bearer_token: null          # Optional: static Bearer token forwarded to upstream server (e.g. "secret-token"). Client Authorization headers are also forwarded if provided.
     tools:
       - name: "read_file"
         description: "Read the contents of a file in the allowed workspace"

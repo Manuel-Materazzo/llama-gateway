@@ -31,9 +31,19 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     if config is None:
         config = load_config()
 
+    def _get_mcp_auth_header(token_str: Optional[str]) -> Optional[dict]:
+        if not token_str:
+            return None
+        stripped = token_str.strip()
+        auth_val = stripped if stripped.lower().startswith("bearer ") else f"Bearer {stripped}"
+        return {"Authorization": auth_val}
+
     backends = [
-        (config.llamacpp.backend_url, config.llamacpp.health_path),
-        *[(mcp.backend_url, mcp.health_path) for mcp in config.mcp_servers],
+        (config.llamacpp.backend_url, config.llamacpp.health_path, None),
+        *[
+            (mcp.backend_url, mcp.health_path, _get_mcp_auth_header(mcp.bearer_token))
+            for mcp in config.mcp_servers
+        ],
     ]
 
     wake_manager = WakeManager(

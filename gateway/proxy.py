@@ -36,12 +36,24 @@ def is_streaming_request(request: Request, body_bytes: bytes) -> bool:
     return False
 
 
-def build_forward_headers(request: Request) -> Dict[str, str]:
+def build_forward_headers(
+    request: Request,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
     """Construct sanitized headers for forwarding to upstream backend."""
     forward_headers = {}
     for key, value in request.headers.items():
         if key.lower() not in EXCLUDED_REQUEST_HEADERS:
             forward_headers[key] = value
+
+    if extra_headers:
+        for extra_key, extra_value in extra_headers.items():
+            # Remove any existing header with the same name case-insensitively
+            keys_to_remove = [k for k in forward_headers if k.lower() == extra_key.lower()]
+            for k in keys_to_remove:
+                del forward_headers[k]
+            forward_headers[extra_key] = extra_value
+
     return forward_headers
 
 
@@ -70,19 +82,26 @@ class ProxyHandler:
         headers: Dict[str, str],
         params: Dict[str, str],
         body_bytes: bytes,
+        health_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[bytes, None]:
         """
         Streaming generator that handles keep-alive during wake-up,
         then streams the upstream response.
         """
         # Check initial reachability
-        is_healthy = await self.wake_manager.check_health(backend_url, health_path)
+        is_healthy = await (
+            self.wake_manager.check_health(backend_url, health_path, headers=health_headers)
+            if health_headers is not None
+            else self.wake_manager.check_health(backend_url, health_path)
+        )
 
         if not is_healthy:
             logger.info("Streaming request detected offline backend %s. Starting wake-up with SSE keep-alive...", backend_url)
             # Start wake task
             wake_task = asyncio.create_task(
-                self.wake_manager.ensure_awake(backend_url, health_path)
+                self.wake_manager.ensure_awake(backend_url, health_path, headers=health_headers)
+                if health_headers is not None
+                else self.wake_manager.ensure_awake(backend_url, health_path)
             )
 
             keep_alive_interval = self.wake_manager.wake_config.keep_alive_interval
@@ -150,6 +169,7 @@ class ProxyHandler:
         path: str,
         health_path: str = "/health",
         override_body: Optional[bytes] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> Response:
         """Forward an HTTP request to the target backend with wake-on-request."""
         body_bytes = override_body if override_body is not None else await request.body()
@@ -157,9 +177,15 @@ class ProxyHandler:
         clean_path = path.lstrip("/")
         target_url = f"{clean_backend}/{clean_path}" if clean_path else clean_backend
 
-        forward_headers = build_forward_headers(request)
+        forward_headers = build_forward_headers(request, extra_headers=extra_headers)
         params = dict(request.query_params)
         is_stream = is_streaming_request(request, body_bytes)
+
+        health_headers = None
+        if extra_headers:
+            health_headers = {k: v for k, v in extra_headers.items() if k.lower() == "authorization"}
+        elif "authorization" in forward_headers:
+            health_headers = {"authorization": forward_headers["authorization"]}
 
         if is_stream:
             # Handle streaming response with SSE keep-alive support
@@ -172,6 +198,7 @@ class ProxyHandler:
                     headers=forward_headers,
                     params=params,
                     body_bytes=body_bytes,
+                    health_headers=health_headers,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -181,7 +208,11 @@ class ProxyHandler:
             )
 
         # Standard non-streaming request
-        success, error_msg = await self.wake_manager.ensure_awake(backend_url, health_path)
+        success, error_msg = await (
+            self.wake_manager.ensure_awake(backend_url, health_path, headers=health_headers)
+            if health_headers is not None
+            else self.wake_manager.ensure_awake(backend_url, health_path)
+        )
         if not success:
             logger.error("Wake-on-request failed for %s: %s", backend_url, error_msg)
             return JSONResponse(
