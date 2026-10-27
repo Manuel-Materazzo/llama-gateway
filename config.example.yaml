@@ -65,6 +65,34 @@ mcp_servers:
               type: "string"
           required: ["url"]
 
+# Web & API Services (Arbitrary Web Services, CI/CD, Dashboards with Wake-on-Request)
+# When accessed via browser while the node is sleeping, the Gateway displays an Onrender-style
+# animated waiting page with real-time SSE boot updates, automatically redirecting when ready.
+# For API requests, transparent wake-and-wait and proxying are performed automatically.
+services:
+  - name: "jenkins"
+    backend_url: "http://10.10.0.2:8080"
+    path_prefix: "/services/jenkins"     # Route prefix (optional; defaults to /services/{name})
+    health_path: "/login"                # Fast probe endpoint to check if service is up (default "/")
+    mode: "proxy"                        # "proxy" (reverse proxy) or "redirect" (redirects browser directly once online)
+    title: "Jenkins CI/CD"
+    description: "Automated continuous integration and build server"
+    icon: "🏗️"
+    # Optional custom wake triggers (executed in addition to global MQTT wake):
+    wake:
+      mqtt_topic: null                   # Optional custom MQTT topic for this service
+      mqtt_payload: null                 # Optional custom MQTT payload
+      webhook_url: null                  # Optional webhook URL to trigger wake (e.g. "http://supervisor:5000/start")
+
+  - name: "grafana"
+    backend_url: "http://10.10.0.2:3000"
+    health_path: "/api/health"
+    mode: "redirect"                     # Directly redirects browser once server is awake
+    redirect_url: "http://10.10.0.2:3000"
+    title: "Grafana Dashboards"
+    description: "System metrics and homelab monitoring"
+    icon: "📊"
+
 # Static models list returned on GET /v1/models (always 200 OK for Open WebUI)
 models:
   - id: "llama-3.3-70b-instruct"

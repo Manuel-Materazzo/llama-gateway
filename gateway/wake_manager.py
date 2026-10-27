@@ -24,6 +24,28 @@ class BackendWakeSession:
         self.event = asyncio.Event()
         self.success: bool = False
         self.error_message: Optional[str] = None
+        self.phase: str = "starting"
+        self.message: str = "Wake-up sequence initiated..."
+        self.subscribers: List[asyncio.Queue] = []
+
+    def update_status(self, phase: str, message: str) -> None:
+        """Update session phase and message, notifying all connected event queues."""
+        self.phase = phase
+        self.message = message
+        now = time.time()
+        elapsed = round(now - self.start_time, 1)
+        data = {
+            "phase": phase,
+            "message": message,
+            "elapsed": elapsed,
+            "timestamp": now,
+            "healthy": phase == "ready",
+        }
+        for q in list(self.subscribers):
+            try:
+                q.put_nowait(data)
+            except Exception:
+                pass
 
 
 class WakeManager:
@@ -138,6 +160,109 @@ class WakeManager:
             logger.debug("Health check unexpected error for %s: %s", full_url, e)
             return False
 
+    def get_wake_session(self, backend_url: str) -> Optional[BackendWakeSession]:
+        """Return the current in-flight wake session for a backend if one exists."""
+        return self._active_sessions.get(backend_url)
+
+    async def subscribe_wake_events(
+        self,
+        backend_url: str,
+        health_path: str = "/health",
+        headers: Optional[Dict[str, str]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Subscribe to live wake events for a backend (for SSE streaming to UI)."""
+        # First check if backend is already healthy
+        is_healthy = await (
+            self.check_health(backend_url, health_path, headers=headers)
+            if headers is not None
+            else self.check_health(backend_url, health_path)
+        )
+        if is_healthy:
+            yield {
+                "phase": "ready",
+                "message": "Service is already online and responding!",
+                "elapsed": 0.0,
+                "healthy": True,
+            }
+            return
+
+        async with self._lock:
+            session = self._active_sessions.get(backend_url)
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        if session is not None:
+            # Send current status snapshot
+            elapsed = round(time.time() - session.start_time, 1)
+            yield {
+                "phase": session.phase,
+                "message": session.message,
+                "elapsed": elapsed,
+                "healthy": session.phase == "ready",
+            }
+            session.subscribers.append(queue)
+        else:
+            yield {
+                "phase": "offline",
+                "message": "Service is currently sleeping.",
+                "elapsed": 0.0,
+                "healthy": False,
+            }
+            return
+
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=2.5)
+                    yield event
+                    if event.get("phase") in ("ready", "failed"):
+                        break
+                except asyncio.TimeoutError:
+                    if session.event.is_set():
+                        break
+                    # Send periodic heartbeat
+                    elapsed = round(time.time() - session.start_time, 1)
+                    yield {
+                        "phase": session.phase,
+                        "message": session.message,
+                        "elapsed": elapsed,
+                        "healthy": session.phase == "ready",
+                    }
+        finally:
+            if session and queue in session.subscribers:
+                session.subscribers.remove(queue)
+
+    async def _trigger_custom_wake(self, wake_config: Any) -> None:
+        """Trigger optional per-service custom wake (custom MQTT topic/payload or webhook)."""
+        mqtt_topic = getattr(wake_config, "mqtt_topic", None)
+        mqtt_payload = getattr(wake_config, "mqtt_payload", None)
+        webhook_url = getattr(wake_config, "webhook_url", None)
+
+        if mqtt_topic:
+            payload = mqtt_payload or "wake"
+            logger.info("Publishing custom service MQTT wake to %s (payload=%s)", mqtt_topic, payload)
+            await self.mqtt_publisher.publish_message(
+                topic=mqtt_topic,
+                payload=payload,
+                action_name="custom service wake",
+            )
+
+        if webhook_url:
+            method = getattr(wake_config, "webhook_method", "POST").upper()
+            webhook_headers = getattr(wake_config, "webhook_headers", {}) or {}
+            webhook_body = getattr(wake_config, "webhook_body", None)
+            logger.info("Triggering custom service wake webhook: %s %s", method, webhook_url)
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.request(
+                        method=method,
+                        url=webhook_url,
+                        headers=webhook_headers,
+                        content=webhook_body.encode("utf-8") if webhook_body else None,
+                    )
+            except Exception as e:
+                logger.error("Error triggering wake webhook %s: %s", webhook_url, e)
+
     async def _poll_until_ready(
         self,
         backend_url: str,
@@ -152,10 +277,13 @@ class WakeManager:
             self.wake_config.max_timeout,
             self.wake_config.polling_interval,
         )
+        session.update_status("booting", "Wake signal delivered. Waiting for server to boot...")
 
         start = time.time()
         while time.time() - start < self.wake_config.max_timeout:
             await asyncio.sleep(self.wake_config.polling_interval)
+            elapsed = time.time() - start
+            session.update_status("checking", f"Waiting for service to become ready ({elapsed:.0f}s elapsed)...")
             healthy = await (
                 self.check_health(backend_url, health_path, headers=headers)
                 if headers is not None
@@ -165,6 +293,7 @@ class WakeManager:
                 elapsed = time.time() - start
                 logger.info("Backend %s is now REACHABLE after %.2f seconds", backend_url, elapsed)
                 session.success = True
+                session.update_status("ready", "Service is online and ready!")
                 session.event.set()
                 async with self._lock:
                     self._active_sessions.pop(backend_url, None)
@@ -181,6 +310,7 @@ class WakeManager:
         session.error_message = (
             f"Backend node at {backend_url} did not respond within {self.wake_config.max_timeout}s{mqtt_err_suffix}."
         )
+        session.update_status("failed", session.error_message)
         session.event.set()
         async with self._lock:
             self._active_sessions.pop(backend_url, None)
@@ -190,6 +320,7 @@ class WakeManager:
         backend_url: str,
         health_path: str = "/health",
         headers: Optional[Dict[str, str]] = None,
+        wake_config: Optional[Any] = None,
     ) -> Tuple[bool, Optional[str]]:
         """
         Ensure the backend is reachable.
@@ -225,7 +356,8 @@ class WakeManager:
                 should_start_wake = True
 
         if should_start_wake:
-            # Publish MQTT wake message
+            session.update_status("waking", "Initiating wake-up command...")
+            # Publish standard MQTT wake message (global node wake)
             logger.info("Publishing MQTT wake signal for backend: %s", backend_url)
             mqtt_published = await self.mqtt_publisher.publish_wake()
             if not mqtt_published:
@@ -235,6 +367,10 @@ class WakeManager:
                     backend_url,
                     err_detail,
                 )
+
+            # Trigger optional per-service custom wake
+            if wake_config:
+                await self._trigger_custom_wake(wake_config)
 
             # Launch polling background task
             asyncio.create_task(self._poll_until_ready(backend_url, health_path, session, headers=headers))

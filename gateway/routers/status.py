@@ -31,6 +31,8 @@ async def get_gateway_status(request: Request) -> Dict[str, Any]:
     backends = {"llamacpp": config.llamacpp.backend_url}
     for mcp in config.mcp_servers:
         backends[f"mcp_{mcp.name}"] = mcp.backend_url
+    for svc in config.services:
+        backends[f"service_{svc.name}"] = svc.backend_url
 
     status_data = wake_manager.get_status_info(backends)
 
@@ -50,6 +52,17 @@ async def get_gateway_status(request: Request) -> Dict[str, Any]:
             mcp.backend_url,
             mcp.health_path,
             headers=mcp_headers,
+        )
+    for svc in config.services:
+        svc_headers = None
+        if svc.bearer_token:
+            token = svc.bearer_token.strip()
+            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            svc_headers = {"Authorization": auth_val}
+        health_tasks[f"service_{svc.name}"] = wake_manager.check_health(
+            svc.backend_url,
+            svc.health_path,
+            headers=svc_headers,
         )
 
     results = await asyncio.gather(*health_tasks.values(), return_exceptions=True)

@@ -13,7 +13,7 @@ import uvicorn
 
 from gateway.config import AppConfig, load_config
 from gateway.proxy import ProxyHandler
-from gateway.routers import discovery, mcp, openai, status
+from gateway.routers import discovery, mcp, openai, services, status
 from gateway.wake_manager import WakeManager
 
 # Configure logging format
@@ -31,7 +31,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     if config is None:
         config = load_config()
 
-    def _get_mcp_auth_header(token_str: Optional[str]) -> Optional[dict]:
+    def _get_auth_header(token_str: Optional[str]) -> Optional[dict]:
         if not token_str:
             return None
         stripped = token_str.strip()
@@ -41,8 +41,12 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     backends = [
         (config.llamacpp.backend_url, config.llamacpp.health_path, None),
         *[
-            (mcp.backend_url, mcp.health_path, _get_mcp_auth_header(mcp.bearer_token))
+            (mcp.backend_url, mcp.health_path, _get_auth_header(mcp.bearer_token))
             for mcp in config.mcp_servers
+        ],
+        *[
+            (svc.backend_url, svc.health_path, _get_auth_header(svc.bearer_token))
+            for svc in config.services
         ],
     ]
 
@@ -59,6 +63,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         logger.info("Starting Llama Gateway...")
         logger.info("Configured llamacpp backend: %s", config.llamacpp.backend_url)
         logger.info("Configured MCP servers: %d", len(config.mcp_servers))
+        logger.info("Configured web/API services: %d", len(config.services))
         logger.info("Configured static models: %d", len(config.models))
         logger.info(
             "MQTT wake broker: %s:%d (topic=%s, tls=%s)",
@@ -108,10 +113,11 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Include routers (order matters: discovery first, then specific OpenAI routes, then status, then catch-all mcp)
+    # Include routers (order matters: discovery first, then specific OpenAI routes, then status, then services, then catch-all mcp)
     app.include_router(discovery.router)
     app.include_router(status.router)
     app.include_router(openai.router)
+    app.include_router(services.create_services_router(config))
     app.include_router(mcp.router)
 
     return app

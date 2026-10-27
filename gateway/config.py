@@ -55,6 +55,51 @@ class MCPServerConfig(BaseModel):
         return data
 
 
+class WebServiceWakeConfig(BaseModel):
+    """Custom wake configuration for an individual web or API service."""
+    mqtt_topic: Optional[str] = None
+    mqtt_payload: Optional[str] = None
+    webhook_url: Optional[str] = None
+    webhook_method: str = "POST"
+    webhook_headers: Dict[str, str] = Field(default_factory=dict)
+    webhook_body: Optional[str] = None
+
+
+class WebServiceConfig(BaseModel):
+    """Configuration for an arbitrary web or API service proxied by the Gateway."""
+    name: str
+    backend_url: str
+    path_prefix: Optional[str] = None
+    health_path: str = "/"
+    mode: str = "proxy"  # "proxy" or "redirect"
+    redirect_url: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    bearer_token: Optional[str] = None
+    wake: Optional[WebServiceWakeConfig] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_service_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "token" in d and "bearer_token" not in d:
+                d["bearer_token"] = d["token"]
+            elif "auth_token" in d and "bearer_token" not in d:
+                d["bearer_token"] = d["auth_token"]
+            return d
+        return data
+
+    @property
+    def effective_path_prefix(self) -> str:
+        """Returns the normalized route prefix for this service, e.g. /services/jenkins or /jenkins."""
+        if self.path_prefix and self.path_prefix.strip():
+            raw = "/" + self.path_prefix.strip("/")
+            return raw
+        return f"/services/{self.name}"
+
+
 class StaticModelConfig(BaseModel):
     """OpenAI model representation for /v1/models."""
     id: str
@@ -134,6 +179,7 @@ class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     llamacpp: LlamaCppConfig = Field(default_factory=LlamaCppConfig)
     mcp_servers: List[MCPServerConfig] = Field(default_factory=list)
+    services: List[WebServiceConfig] = Field(default_factory=list)
     models: List[StaticModelConfig] = Field(default_factory=list)
     mqtt: MQTTConfig = Field(default_factory=MQTTConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
