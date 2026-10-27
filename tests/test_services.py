@@ -301,3 +301,74 @@ def test_custom_service_wake_triggers(app):
         # Check Webhook
         mock_req.assert_called_once()
         assert mock_req.call_args[1]["url"] == "http://supervisor:8080/start"
+
+
+def test_is_local_url_and_wake_node_detection():
+    """Verify local URL detection and should_wake_node property behavior."""
+    from gateway.config import is_local_url
+
+    assert is_local_url("http://localhost:8080") is True
+    assert is_local_url("http://127.0.0.1:3000") is True
+    assert is_local_url("http://0.0.0.0:8000") is True
+    assert is_local_url("http://[::1]:5000") is True
+    assert is_local_url("http://10.10.0.2:8080") is False
+    assert is_local_url("http://remote-server:8080") is False
+
+    # Auto-detected local
+    s_local = WebServiceConfig(name="local1", backend_url="http://localhost:8080")
+    assert s_local.should_wake_node is False
+
+    # Auto-detected remote
+    s_remote = WebServiceConfig(name="remote1", backend_url="http://10.10.0.2:8080")
+    assert s_remote.should_wake_node is True
+
+    # Explicit override: wake_node=False on remote
+    s_remote_skip = WebServiceConfig(name="remote2", backend_url="http://10.10.0.2:8080", wake_node=False)
+    assert s_remote_skip.should_wake_node is False
+
+    # Explicit override: wake_node=True on localhost
+    s_local_force = WebServiceConfig(name="local2", backend_url="http://localhost:8080", wake_node=True)
+    assert s_local_force.should_wake_node is True
+
+    # Aliases
+    s_alias1 = WebServiceConfig(name="a1", backend_url="http://10.10.0.2:8080", skip_node_wake=True)
+    assert s_alias1.should_wake_node is False
+
+    s_alias2 = WebServiceConfig(name="a2", backend_url="http://10.10.0.2:8080", local=True)
+    assert s_alias2.should_wake_node is False
+
+
+def test_local_service_skips_physical_node_wake():
+    """Verify that a local service or wake_node=False service skips MQTT node wake."""
+    cfg = AppConfig(
+        services=[
+            WebServiceConfig(
+                name="localdocker",
+                backend_url="http://127.0.0.1:9090",
+                path_prefix="/localdocker",
+                wake_node=False,
+                wake=WebServiceWakeConfig(webhook_url="http://127.0.0.1:5555/start-container"),
+            )
+        ],
+        wake={"health_check_timeout": 0.05, "polling_interval": 0.05, "max_timeout": 0.15},
+    )
+    test_app = create_app(cfg)
+    client = TestClient(test_app)
+
+    wake_manager = test_app.state.wake_manager
+    wake_manager.check_health = AsyncMock(return_value=False)
+    wake_manager.mqtt_publisher.publish_wake = AsyncMock(return_value=True)
+    wake_manager._trigger_custom_wake = AsyncMock()
+
+    # Browser request should return waiting page customized for local service
+    resp = client.get("/localdocker", headers={"accept": "text/html"})
+    assert resp.status_code == 200
+    assert "Starting local container / service" in resp.text
+    assert "Local containerized service" in resp.text
+
+    # Verify MQTT node wake was NOT called!
+    wake_manager.mqtt_publisher.publish_wake.assert_not_called()
+
+    # Verify custom service wake was triggered!
+    wake_manager._trigger_custom_wake.assert_called_once()
+

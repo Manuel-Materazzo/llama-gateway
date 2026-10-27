@@ -47,6 +47,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         *[
             (svc.backend_url, svc.health_path, _get_auth_header(svc.bearer_token))
             for svc in config.services
+            if svc.should_wake_node
         ],
     ]
 

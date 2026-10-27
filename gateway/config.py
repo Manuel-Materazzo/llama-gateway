@@ -55,6 +55,19 @@ class MCPServerConfig(BaseModel):
         return data
 
 
+from urllib.parse import urlparse
+
+
+def is_local_url(url: str) -> bool:
+    """Check if a URL points to localhost or loopback address."""
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        return hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    except Exception:
+        return False
+
+
 class WebServiceWakeConfig(BaseModel):
     """Custom wake configuration for an individual web or API service."""
     mqtt_topic: Optional[str] = None
@@ -77,6 +90,7 @@ class WebServiceConfig(BaseModel):
     description: Optional[str] = None
     icon: Optional[str] = None
     bearer_token: Optional[str] = None
+    wake_node: Optional[bool] = None  # None = auto-detect from backend_url; False = skip physical node wake
     wake: Optional[WebServiceWakeConfig] = None
 
     @model_validator(mode="before")
@@ -88,8 +102,22 @@ class WebServiceConfig(BaseModel):
                 d["bearer_token"] = d["token"]
             elif "auth_token" in d and "bearer_token" not in d:
                 d["bearer_token"] = d["auth_token"]
+
+            if "skip_node_wake" in d and "wake_node" not in d:
+                d["wake_node"] = not d["skip_node_wake"]
+            elif "local" in d and "wake_node" not in d:
+                d["wake_node"] = not d["local"]
+            elif "remote" in d and "wake_node" not in d:
+                d["wake_node"] = bool(d["remote"])
             return d
         return data
+
+    @property
+    def should_wake_node(self) -> bool:
+        """Determines whether the physical remote node should be powered on via global MQTT wake."""
+        if self.wake_node is not None:
+            return self.wake_node
+        return not is_local_url(self.backend_url)
 
     @property
     def effective_path_prefix(self) -> str:

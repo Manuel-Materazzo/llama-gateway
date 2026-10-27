@@ -91,6 +91,7 @@ async def handle_service_request(
                     health_path=service.health_path,
                     headers=auth_headers,
                     wake_config=service.wake,
+                    wake_node=service.should_wake_node,
                 )
             )
 
@@ -126,6 +127,7 @@ async def handle_service_request(
                 health_path=service.health_path,
                 headers=auth_headers,
                 wake_config=service.wake,
+                wake_node=service.should_wake_node,
             )
             if not success:
                 logger.error("Wake-on-request failed for service '%s': %s", service.name, err_msg)
@@ -141,8 +143,9 @@ async def handle_service_request(
                 )
 
     # 3. Server is healthy: proxy or redirect
-    if service.mode == "redirect":
+    if service.should_wake_node:
         wake_manager.record_activity()
+    if service.mode == "redirect":
         base_target = (service.redirect_url or service.backend_url).rstrip("/")
         dest_url = f"{base_target}/{clean_subpath}" if clean_subpath else base_target
         if request.url.query:
@@ -199,6 +202,7 @@ def create_services_router(config: AppConfig) -> APIRouter:
                 "description": svc.description,
                 "path": svc.effective_path_prefix,
                 "mode": svc.mode,
+                "wake_node": svc.should_wake_node,
                 "backend_url": svc.backend_url,
                 "healthy": is_healthy,
                 "icon": svc.icon or "⚡",
@@ -226,6 +230,7 @@ def create_services_router(config: AppConfig) -> APIRouter:
                 "healthy": is_healthy,
                 "waking": session is not None and not session.event.is_set(),
                 "mode": svc.mode,
+                "wake_node": svc.should_wake_node,
                 "backend_url": svc.backend_url,
                 "redirect_url": svc.redirect_url or svc.backend_url,
                 "phase": session.phase if session else ("ready" if is_healthy else "offline"),
@@ -265,9 +270,10 @@ def create_services_router(config: AppConfig) -> APIRouter:
                     health_path=svc.health_path,
                     headers=auth_headers,
                     wake_config=svc.wake,
+                    wake_node=svc.should_wake_node,
                 )
             )
-            return {"status": "waking", "service": svc.name}
+            return {"status": "waking", "service": svc.name, "wake_node": svc.should_wake_node}
 
         # Direct waiting page preview
         @router.get(f"{norm_prefix}/_gateway/wait")

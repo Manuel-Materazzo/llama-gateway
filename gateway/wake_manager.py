@@ -269,15 +269,22 @@ class WakeManager:
         health_path: str,
         session: BackendWakeSession,
         headers: Optional[Dict[str, str]] = None,
+        is_local: bool = False,
     ) -> None:
         """Background worker that polls backend until healthy or max timeout expires."""
         logger.info(
-            "Starting wake-up polling loop for backend %s (max_timeout=%.1fs, interval=%.1fs)",
+            "Starting wake-up polling loop for backend %s (max_timeout=%.1fs, interval=%.1fs, is_local=%s)",
             backend_url,
             self.wake_config.max_timeout,
             self.wake_config.polling_interval,
+            is_local,
         )
-        session.update_status("booting", "Wake signal delivered. Waiting for server to boot...")
+        initial_msg = (
+            "Service startup sequence dispatched. Waiting for local service..."
+            if is_local
+            else "Wake signal delivered. Waiting for server to boot..."
+        )
+        session.update_status("booting", initial_msg)
 
         start = time.time()
         while time.time() - start < self.wake_config.max_timeout:
@@ -306,7 +313,7 @@ class WakeManager:
             elapsed,
         )
         session.success = False
-        mqtt_err_suffix = f" (MQTT wake publish error: {self.mqtt_publisher.last_error})" if self.mqtt_publisher.last_error else ""
+        mqtt_err_suffix = f" (MQTT wake publish error: {self.mqtt_publisher.last_error})" if (self.mqtt_publisher.last_error and not is_local) else ""
         session.error_message = (
             f"Backend node at {backend_url} did not respond within {self.wake_config.max_timeout}s{mqtt_err_suffix}."
         )
@@ -321,10 +328,13 @@ class WakeManager:
         health_path: str = "/health",
         headers: Optional[Dict[str, str]] = None,
         wake_config: Optional[Any] = None,
+        wake_node: bool = True,
     ) -> Tuple[bool, Optional[str]]:
         """
         Ensure the backend is reachable.
-        If not reachable, trigger MQTT wake (debounced) and wait for it to be ready.
+        If not reachable, trigger wake (debounced) and wait for it to be ready.
+        If wake_node is True, publishes global MQTT node wake.
+        If wake_node is False, skips node wake and only triggers custom wake_config if set.
         Returns (success, error_message).
         """
         # 1. Fast path: check if backend is already healthy
@@ -340,7 +350,11 @@ class WakeManager:
                 self.node_online_since = now
             return True, None
 
-        logger.info("Backend %s is not reachable. Initiating wake-on-request flow...", backend_url)
+        logger.info(
+            "Backend %s is not reachable. Initiating wake-on-request flow (wake_node=%s)...",
+            backend_url,
+            wake_node,
+        )
 
         # 2. Synchronize wake attempt to debounce MQTT messages
         session: Optional[BackendWakeSession] = None
@@ -356,24 +370,39 @@ class WakeManager:
                 should_start_wake = True
 
         if should_start_wake:
-            session.update_status("waking", "Initiating wake-up command...")
-            # Publish standard MQTT wake message (global node wake)
-            logger.info("Publishing MQTT wake signal for backend: %s", backend_url)
-            mqtt_published = await self.mqtt_publisher.publish_wake()
-            if not mqtt_published:
-                err_detail = self.mqtt_publisher.last_error or "Unknown MQTT error"
-                logger.error(
-                    "MQTT wake signal publish FAILED for backend %s: %s; polling will proceed in case node is already powering on.",
+            if wake_node:
+                session.update_status("waking", "Initiating remote node wake-up...")
+                # Publish standard MQTT wake message (global node wake)
+                logger.info("Publishing MQTT wake signal for backend: %s", backend_url)
+                mqtt_published = await self.mqtt_publisher.publish_wake()
+                if not mqtt_published:
+                    err_detail = self.mqtt_publisher.last_error or "Unknown MQTT error"
+                    logger.error(
+                        "MQTT wake signal publish FAILED for backend %s: %s; polling will proceed in case node is already powering on.",
+                        backend_url,
+                        err_detail,
+                    )
+            else:
+                logger.info(
+                    "Skipping physical node MQTT wake for %s (local service / wake_node=False)",
                     backend_url,
-                    err_detail,
                 )
+                session.update_status("waking", "Initiating service startup...")
 
             # Trigger optional per-service custom wake
             if wake_config:
                 await self._trigger_custom_wake(wake_config)
 
             # Launch polling background task
-            asyncio.create_task(self._poll_until_ready(backend_url, health_path, session, headers=headers))
+            asyncio.create_task(
+                self._poll_until_ready(
+                    backend_url,
+                    health_path,
+                    session,
+                    headers=headers,
+                    is_local=not wake_node,
+                )
+            )
 
         # 3. Await completion of the wake session
         await session.event.wait()

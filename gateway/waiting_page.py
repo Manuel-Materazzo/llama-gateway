@@ -27,11 +27,30 @@ def render_waiting_page(
     icon = html.escape(service.icon or "⚡")
     safe_name = html.escape(service.name)
     mode = html.escape(service.mode)
+    is_local = not service.should_wake_node
+
+    if is_local:
+        step1_text = "1. Service startup signal dispatched"
+        step2_text = "2. Starting local container / service"
+        step3_text = "3. Probing health check endpoint"
+        status_label = "Starting local service..."
+        initial_log = "Incoming request detected; starting local service."
+        boot_log_title = "Local Startup Log"
+        footer_note = "Powered by Llama Gateway &bull; Local containerized service"
+    else:
+        step1_text = "1. Wake command delivered to node"
+        step2_text = "2. Powering on physical machine &amp; OS"
+        step3_text = "3. Initializing web service &amp; probing health"
+        status_label = "Waking up server..."
+        initial_log = "Incoming request detected; remote wake signal dispatched."
+        boot_log_title = "Boot Sequence Log"
+        footer_note = "Powered by Llama Gateway &bull; Zero-idle energy saving architecture"
 
     # Prepare JS parameters
     js_config = json.dumps({
         "serviceName": service.name,
         "mode": service.mode,
+        "isLocal": is_local,
         "redirectUrl": target_redirect_url,
         "eventsUrl": events_url,
         "statusUrl": status_url,
@@ -381,7 +400,7 @@ def render_waiting_page(
 
     <div class="status-pill">
       <span class="status-pulse" id="pulseDot"></span>
-      <span id="statusLabel">Waking up server...</span>
+      <span id="statusLabel">{status_label}</span>
     </div>
 
     <div class="progress-box">
@@ -397,15 +416,15 @@ def render_waiting_page(
     <div class="steps-list">
       <div class="step-item done" id="step1">
         <div class="step-dot">&check;</div>
-        <span>1. Wake command delivered to node</span>
+        <span>{step1_text}</span>
       </div>
       <div class="step-item active" id="step2">
         <div class="step-dot">2</div>
-        <span>2. Powering on physical machine &amp; OS</span>
+        <span>{step2_text}</span>
       </div>
       <div class="step-item" id="step3">
         <div class="step-dot">3</div>
-        <span>3. Initializing web service &amp; probing health</span>
+        <span>{step3_text}</span>
       </div>
       <div class="step-item" id="step4">
         <div class="step-dot">4</div>
@@ -418,10 +437,10 @@ def render_waiting_page(
         <div class="console-dots">
           <span></span><span></span><span></span>
         </div>
-        <span>Boot Sequence Log</span>
+        <span>{boot_log_title}</span>
       </div>
       <div class="console-body" id="consoleBody">
-        <div class="console-log"><span class="console-time">00:00</span>Incoming request detected; wake signal dispatched.</div>
+        <div class="console-log"><span class="console-time">00:00</span>{initial_log}</div>
       </div>
     </div>
 
@@ -436,7 +455,7 @@ def render_waiting_page(
   </div>
 
   <div class="footer-note">
-    Powered by Llama Gateway &bull; Zero-idle energy saving architecture
+    {footer_note}
   </div>
 
   <script>

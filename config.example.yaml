@@ -93,6 +93,21 @@ services:
     description: "System metrics and homelab monitoring"
     icon: "📊"
 
+  # Esempio Servizio Locale / Container (Non richiede l'accensione del server fisico remoto):
+  # Gli URL locali (localhost / 127.0.0.1) o la flag esplicita 'wake_node: false' (o 'skip_node_wake: true')
+  # saltano l'accensione del nodo fisico remoto e attivano solo l'eventuale wake del servizio (es. webhook o MQTT)
+  - name: "local-dashboard"
+    backend_url: "http://127.0.0.1:8080"
+    path_prefix: "/dashboard"
+    health_path: "/healthz"
+    mode: "proxy"
+    wake_node: false                     # Salta il risveglio fisico del server remoto (auto-rilevato per 127.0.0.1/localhost)
+    title: "Gateway Local Dashboard"
+    description: "Dashboard locale in esecuzione direttamente sulla macchina gateway"
+    icon: "⚡"
+    wake:
+      webhook_url: "http://127.0.0.1:5000/docker/start/dashboard" # Opzionale: avvia solo il container locale quando spento
+
 # Static models list returned on GET /v1/models (always 200 OK for Open WebUI)
 models:
   - id: "llama-3.3-70b-instruct"
