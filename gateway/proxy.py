@@ -133,7 +133,10 @@ class ProxyHandler:
         # Upstream is healthy: stream real response
         logger.info("Forwarding streaming request to %s", target_url)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.client_timeout)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self.client_timeout),
+                follow_redirects=True,
+            ) as client:
                 async with client.stream(
                     method=method,
                     url=target_url,
@@ -229,7 +232,10 @@ class ProxyHandler:
         # Upstream is awake, send request
         logger.info("Forwarding request [%s] %s", request.method, target_url)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.client_timeout)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self.client_timeout),
+                follow_redirects=True,
+            ) as client:
                 upstream_resp = await client.request(
                     method=request.method,
                     url=target_url,

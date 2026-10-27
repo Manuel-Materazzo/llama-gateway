@@ -86,11 +86,20 @@ async def sync_mcp_server_endpoint(
 
 
 @router.api_route(
+    "/mcp/{server_name}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    tags=["MCP Proxy"],
+)
+@router.api_route(
     "/mcp/{server_name}/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     tags=["MCP Proxy"],
 )
-async def proxy_mcp_request(server_name: str, path: str, request: Request) -> Response:
+async def proxy_mcp_request(
+    server_name: str,
+    request: Request,
+    path: str = "",
+) -> Response:
     """
     Proxy operational calls to specific MCP servers with wake-on-request
     and automatic injection of hidden/default parameters.
@@ -139,6 +148,14 @@ async def proxy_mcp_request(server_name: str, path: str, request: Request) -> Re
         auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
         extra_headers["Authorization"] = auth_val
 
+    # Ensure Accept header includes text/event-stream for Streamable HTTP servers
+    req_accept = request.headers.get("accept", "")
+    if "text/event-stream" not in req_accept:
+        if req_accept:
+            extra_headers["Accept"] = f"{req_accept}, text/event-stream"
+        else:
+            extra_headers["Accept"] = "application/json, text/event-stream"
+
     # Opportunistic sync: if auto_discover is enabled and tools are not yet cached/populated,
     # trigger background sync since the backend is being contacted.
     if mcp_config.auto_discover and not mcp_config.tools:
@@ -150,7 +167,7 @@ async def proxy_mcp_request(server_name: str, path: str, request: Request) -> Re
     return await proxy_handler.forward_request(
         request=request,
         backend_url=mcp_config.backend_url,
-        path=f"/{path.lstrip('/')}" if path else "/",
+        path=f"/{path.lstrip('/')}" if path else "",
         health_path=mcp_config.health_path,
         override_body=transformed_body,
         extra_headers=extra_headers if extra_headers else None,

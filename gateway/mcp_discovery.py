@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import json
 import logging
 from pathlib import Path
 import sys
@@ -18,6 +19,44 @@ from gateway.wake_manager import WakeManager
 logger = logging.getLogger("llama_gateway.mcp_discovery")
 
 
+def _parse_response_json(resp: httpx.Response) -> Optional[Dict[str, Any]]:
+    """Parse JSON or SSE text/event-stream from an MCP response."""
+    try:
+        return resp.json()
+    except Exception:
+        pass
+
+    text = resp.text
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            data_str = line[5:].strip()
+            if data_str and data_str != "[DONE]":
+                try:
+                    parsed = json.loads(data_str)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    continue
+    return None
+
+
+def _extract_tools_from_response(data: Any) -> Optional[List[Dict[str, Any]]]:
+    """Extract tools list from parsed response payload."""
+    if not isinstance(data, dict):
+        return None
+    tools = None
+    if "result" in data and isinstance(data["result"], dict):
+        tools = data["result"].get("tools")
+    elif "tools" in data:
+        tools = data.get("tools")
+    elif isinstance(data, list):
+        tools = data
+    if isinstance(tools, list):
+        return _normalize_tools(tools)
+    return None
+
+
 async def fetch_tools_from_mcp_server(
     backend_url: str,
     bearer_token: Optional[str] = None,
@@ -26,74 +65,151 @@ async def fetch_tools_from_mcp_server(
 ) -> List[Dict[str, Any]]:
     """
     Query an upstream MCP server for its list of exposed tools.
-    Supports standard JSON-RPC 2.0 (tools/list) and REST fallbacks.
+    Supports standard JSON-RPC 2.0 (tools/list), Streamable HTTP MCP handshake
+    (initialize -> notifications/initialized -> tools/list), and REST fallbacks.
     """
     clean_base = backend_url.rstrip("/")
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
     if bearer_token:
         token = bearer_token.strip()
         auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
         headers["Authorization"] = auth_val
 
-    jsonrpc_payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list",
-        "params": {},
-    }
-
-    # Candidate endpoints for JSON-RPC POST
-    post_candidate_urls = [
-        f"{clean_base}/",
-        f"{clean_base}/tools/list",
-        f"{clean_base}/mcp",
-    ]
+    # Candidate endpoints for JSON-RPC POST (clean_base tried first, with and without trailing slash)
+    post_candidate_urls: List[str] = [clean_base, f"{clean_base}/"]
+    if not clean_base.endswith("/mcp"):
+        post_candidate_urls.extend([f"{clean_base}/mcp", f"{clean_base}/mcp/"])
+    if not clean_base.endswith("/tools/list"):
+        post_candidate_urls.append(f"{clean_base}/tools/list")
+    # Deduplicate while preserving order
+    post_candidate_urls = list(dict.fromkeys(post_candidate_urls))
 
     close_client = False
     if client is None:
-        client = httpx.AsyncClient(timeout=timeout)
+        client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
         close_client = True
 
     try:
         last_error = None
 
-        # 1. Try standard JSON-RPC POST calls
+        # 1. Try JSON-RPC POST calls
         for url in post_candidate_urls:
+            # 1a. Try direct tools/list call
             try:
-                resp = await client.post(url, json=jsonrpc_payload, headers=headers)
+                jsonrpc_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list",
+                    "params": {},
+                }
+                resp = await client.post(
+                    url,
+                    json=jsonrpc_payload,
+                    headers=headers,
+                )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    tools = None
-                    if isinstance(data, dict):
-                        if "result" in data and isinstance(data["result"], dict):
-                            tools = data["result"].get("tools")
-                        elif "tools" in data:
-                            tools = data.get("tools")
-                    if isinstance(tools, list):
+                    data = _parse_response_json(resp)
+                    tools = _extract_tools_from_response(data)
+                    if tools is not None:
                         logger.info("Discovered %d tools from %s via JSON-RPC", len(tools), url)
-                        return _normalize_tools(tools)
+                        return tools
+                else:
+                    last_error = f"HTTP {resp.status_code} from {url}"
             except Exception as e:
                 last_error = e
-                continue
+
+            # 1b. Try MCP initialize handshake (Streamable HTTP / standard MCP lifecycle)
+            for proto_ver in ["2025-03-26", "2024-11-05"]:
+                try:
+                    init_payload = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": proto_ver,
+                            "capabilities": {},
+                            "clientInfo": {"name": "llama-gateway", "version": "1.0"},
+                        },
+                    }
+                    init_resp = await client.post(
+                        url,
+                        json=init_payload,
+                        headers=headers,
+                    )
+                    if init_resp.status_code == 200:
+                        init_data = _parse_response_json(init_resp)
+                        if init_data and "result" in init_data:
+                            session_headers = dict(headers)
+                            session_id = init_resp.headers.get("mcp-session-id")
+                            if session_id:
+                                session_headers["mcp-session-id"] = session_id
+
+                            # Send notifications/initialized
+                            notify_payload = {
+                                "jsonrpc": "2.0",
+                                "method": "notifications/initialized",
+                            }
+                            try:
+                                await client.post(
+                                    url,
+                                    json=notify_payload,
+                                    headers=session_headers,
+                                )
+                            except Exception:
+                                pass
+
+                            # Send tools/list
+                            tools_list_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "tools/list",
+                                "params": {},
+                            }
+                            list_resp = await client.post(
+                                url,
+                                json=tools_list_payload,
+                                headers=session_headers,
+                            )
+                            if list_resp.status_code == 200:
+                                list_data = _parse_response_json(list_resp)
+                                tools = _extract_tools_from_response(list_data)
+                                if tools is not None:
+                                    logger.info(
+                                        "Discovered %d tools from %s via MCP initialize handshake",
+                                        len(tools),
+                                        url,
+                                    )
+                                    return tools
+                            else:
+                                last_error = f"HTTP {list_resp.status_code} from {url} on tools/list"
+                            break  # Successfully initialized with this protocol version
+                    elif init_resp.status_code != 404:
+                        last_error = f"HTTP {init_resp.status_code} from {url} on initialize"
+                except Exception as e:
+                    last_error = e
 
         # 2. Try REST GET endpoints fallback (/tools, /tools/list)
-        get_candidate_urls = [
-            f"{clean_base}/tools",
-            f"{clean_base}/tools/list",
-        ]
+        get_candidate_urls = []
+        if clean_base.endswith("/tools") or clean_base.endswith("/tools/list"):
+            get_candidate_urls.append(clean_base)
+        else:
+            get_candidate_urls.extend([f"{clean_base}/tools", f"{clean_base}/tools/list"])
+        get_candidate_urls = list(dict.fromkeys(get_candidate_urls))
+
         for url in get_candidate_urls:
             try:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
-                    data = resp.json()
-                    tools = None
-                    if isinstance(data, dict):
-                        tools = data.get("tools")
-                    elif isinstance(data, list):
-                        tools = data
-                    if isinstance(tools, list):
+                    data = _parse_response_json(resp)
+                    tools = _extract_tools_from_response(data)
+                    if tools is not None:
                         logger.info("Discovered %d tools from %s via REST", len(tools), url)
-                        return _normalize_tools(tools)
+                        return tools
+                else:
+                    last_error = f"HTTP {resp.status_code} from {url}"
             except Exception as e:
                 last_error = e
                 continue

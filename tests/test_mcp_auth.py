@@ -152,3 +152,46 @@ def test_mcp_status_health_check_passes_bearer_token():
         mcp_call = next((c for c in health_calls if "8004" in c[0]), None)
         assert mcp_call is not None
         assert mcp_call[2] == {"Authorization": "Bearer health-check-token"}
+
+
+def test_mcp_proxy_without_subpath_and_streamable_accept_header():
+    """Verify that posting to /mcp/{server} matches root and ensures Accept text/event-stream header."""
+    app_config = AppConfig(
+        mcp_servers=[
+            MCPServerConfig(
+                name="mcpo",
+                backend_url="http://192.168.1.115:8000/mcp",
+                tools=[{"name": "test_tool"}],
+            )
+        ]
+    )
+    app = create_app(app_config)
+    client = TestClient(app)
+
+    app.state.wake_manager.check_health = AsyncMock(return_value=True)
+
+    captured_url = None
+    captured_headers = None
+
+    async def mock_request(*args, **kwargs):
+        nonlocal captured_url, captured_headers
+        captured_url = kwargs.get("url")
+        captured_headers = kwargs.get("headers", {})
+        return httpx.Response(status_code=200, json={"result": "ok"})
+
+    with patch("httpx.AsyncClient.request", new=mock_request):
+        # Client calls /mcp/mcpo without trailing slash, with standard JSON Accept header
+        resp = client.post(
+            "/mcp/mcpo",
+            headers={"Accept": "application/json"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "test_tool"},
+        )
+        assert resp.status_code == 200
+        # Upstream URL should match backend_url exactly without unintended trailing slash
+        assert captured_url == "http://192.168.1.115:8000/mcp"
+        # Accept header must include text/event-stream for Streamable HTTP servers
+        accept_header = next(
+            (v for k, v in captured_headers.items() if k.lower() == "accept"), ""
+        )
+        assert "application/json" in accept_header
+        assert "text/event-stream" in accept_header

@@ -53,7 +53,8 @@ class WakeManager:
         self._lock = asyncio.Lock()
         self._active_sessions: Dict[str, BackendWakeSession] = {}
         self._http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(self.wake_config.health_check_timeout)
+            timeout=httpx.Timeout(self.wake_config.health_check_timeout),
+            follow_redirects=True,
         )
 
     async def close(self) -> None:

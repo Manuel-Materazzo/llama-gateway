@@ -84,6 +84,121 @@ async def test_fetch_tools_with_bearer_token():
     )
     assert captured_headers is not None
     assert captured_headers.get("Authorization") == "Bearer secret-token-123"
+    assert "application/json" in captured_headers.get("Accept", "")
+    assert "text/event-stream" in captured_headers.get("Accept", "")
+
+
+@pytest.mark.asyncio
+async def test_fetch_tools_exact_url_without_trailing_slash():
+    """Verify that backend_url ending with /mcp probes http://.../mcp directly first without trailing slash."""
+    probed_urls = []
+
+    async def mock_post(url, json=None, headers=None):
+        probed_urls.append(url)
+        assert "application/json" in headers.get("Accept", "")
+        assert "text/event-stream" in headers.get("Accept", "")
+        return httpx.Response(
+            status_code=200,
+            json={"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "my_tool"}]}},
+        )
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=mock_post)
+
+    tools = await fetch_tools_from_mcp_server("http://192.168.1.115:8000/mcp", client=mock_client)
+    assert len(tools) == 1
+    assert tools[0]["name"] == "my_tool"
+    # First candidate URL MUST be exact match without trailing slash
+    assert probed_urls[0] == "http://192.168.1.115:8000/mcp"
+
+
+@pytest.mark.asyncio
+async def test_fetch_tools_mcp_initialize_handshake_stateful():
+    """Verify that when direct tools/list fails, client performs full MCP initialize handshake with session ID."""
+    calls = []
+
+    async def mock_post(url, json=None, headers=None):
+        method = json.get("method")
+        calls.append((url, method, headers))
+
+        if method == "tools/list" and "mcp-session-id" not in headers:
+            # Server returns 406 or 400 when session is not yet initialized
+            return httpx.Response(status_code=406, text="Not Acceptable without session")
+
+        if method == "initialize":
+            assert json["params"]["protocolVersion"] in ("2025-03-26", "2024-11-05")
+            return httpx.Response(
+                status_code=200,
+                headers={"mcp-session-id": "test-session-xyz-123"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "mcpo", "version": "1.0"},
+                    },
+                },
+            )
+
+        if method == "notifications/initialized":
+            assert headers.get("mcp-session-id") == "test-session-xyz-123"
+            return httpx.Response(status_code=200, text="")
+
+        if method == "tools/list" and headers.get("mcp-session-id") == "test-session-xyz-123":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "discovered_streamable_tool",
+                                "description": "Streamable MCP tool",
+                                "inputSchema": {"type": "object"},
+                            }
+                        ]
+                    },
+                },
+            )
+
+        return httpx.Response(status_code=400)
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=mock_post)
+
+    tools = await fetch_tools_from_mcp_server("http://192.168.1.115:8000/mcp", client=mock_client)
+    assert len(tools) == 1
+    assert tools[0]["name"] == "discovered_streamable_tool"
+
+    methods_called = [c[1] for c in calls]
+    assert "initialize" in methods_called
+    assert "notifications/initialized" in methods_called
+    assert "tools/list" in methods_called
+
+
+@pytest.mark.asyncio
+async def test_fetch_tools_sse_response_stream():
+    """Verify tool discovery handles text/event-stream SSE formatted responses."""
+    sse_body = (
+        "event: message\n"
+        'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"sse_tool","description":"Tool from SSE"}]}}\n\n'
+    )
+
+    async def mock_post(url, json=None, headers=None):
+        return httpx.Response(
+            status_code=200,
+            headers={"Content-Type": "text/event-stream"},
+            text=sse_body,
+        )
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=mock_post)
+
+    tools = await fetch_tools_from_mcp_server("http://node:8001", client=mock_client)
+    assert len(tools) == 1
+    assert tools[0]["name"] == "sse_tool"
 
 
 def test_merge_tools_preserves_customizations():
