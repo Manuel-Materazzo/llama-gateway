@@ -144,6 +144,8 @@ async def test_auto_shutdown_triggers_when_node_online_and_idle(wake_config, mqt
     )
     wm.start_time = time.time() - 100.0
     wm.last_activity = time.time() - 200.0
+    wm.has_active_session = True
+    wm.node_online_since = time.time() - 100.0
     wm.is_node_alive = AsyncMock(return_value=True)
     wm.mqtt_publisher.publish_shutdown = AsyncMock(return_value=True)
 
@@ -154,6 +156,8 @@ async def test_auto_shutdown_triggers_when_node_online_and_idle(wake_config, mqt
         payload="toggle-power",
     )
     assert wm.last_shutdown_time is not None
+    assert wm.has_active_session is False
+    assert wm.node_online_since is None
     await wm.close()
 
 
@@ -174,6 +178,8 @@ async def test_auto_shutdown_custom_topic_and_payload(wake_config, mqtt_config):
     )
     wm.start_time = time.time() - 100.0
     wm.last_activity = time.time() - 200.0
+    wm.has_active_session = True
+    wm.node_online_since = time.time() - 100.0
     wm.is_node_alive = AsyncMock(return_value=True)
     wm.mqtt_publisher.publish_shutdown = AsyncMock(return_value=True)
 
@@ -183,6 +189,129 @@ async def test_auto_shutdown_custom_topic_and_payload(wake_config, mqtt_config):
         topic="custom/node/poweroff",
         payload="shutdown-now",
     )
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_shutdown_skipped_when_never_started_or_used_by_gateway(wake_config, mqtt_config, auto_shutdown_config):
+    """
+    CRITICAL: When the server is online but was never started through the gateway
+    (no active session and not woken by gateway), auto-shutdown must NOT trigger,
+    preventing unwanted shutdowns of manually started servers.
+    """
+    wm = WakeManager(
+        wake_config=wake_config,
+        mqtt_config=mqtt_config,
+        auto_shutdown_config=auto_shutdown_config,
+        monitored_backends=[("http://node:8080", "/health")],
+    )
+    wm.start_time = time.time() - 1000.0
+    wm.last_activity = time.time() - 1000.0
+    wm.is_node_alive = AsyncMock(return_value=True)
+    wm.mqtt_publisher.publish_shutdown = AsyncMock(return_value=True)
+
+    # has_active_session is False, server_woken is False
+    triggered = await wm.check_and_trigger_auto_shutdown()
+    assert triggered is False
+    wm.mqtt_publisher.publish_shutdown.assert_not_called()
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_shutdown_node_uptime_grace_period(wake_config, mqtt_config, auto_shutdown_config):
+    """
+    When node recently came online (uptime within grace period),
+    auto-shutdown must NOT trigger even if gateway was idle for long.
+    """
+    wm = WakeManager(
+        wake_config=wake_config,
+        mqtt_config=mqtt_config,
+        auto_shutdown_config=auto_shutdown_config,
+        monitored_backends=[("http://node:8080", "/health")],
+    )
+    wm.start_time = time.time() - 1000.0
+    wm.last_activity = time.time() - 1000.0
+    wm.has_active_session = True
+    # Node only came online 2 seconds ago (grace period is 10s)
+    wm.node_online_since = time.time() - 2.0
+    wm.is_node_alive = AsyncMock(return_value=True)
+    wm.mqtt_publisher.publish_shutdown = AsyncMock(return_value=True)
+
+    triggered = await wm.check_and_trigger_auto_shutdown()
+    assert triggered is False
+    wm.mqtt_publisher.publish_shutdown.assert_not_called()
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_shutdown_failed_attempt_cooldown(wake_config, mqtt_config, auto_shutdown_config):
+    """
+    When MQTT shutdown publish fails, a cooldown is enforced so it does not
+    hammer the broker on every check interval.
+    """
+    wm = WakeManager(
+        wake_config=wake_config,
+        mqtt_config=mqtt_config,
+        auto_shutdown_config=auto_shutdown_config,
+        monitored_backends=[("http://node:8080", "/health")],
+    )
+    wm.start_time = time.time() - 100.0
+    wm.last_activity = time.time() - 200.0
+    wm.has_active_session = True
+    wm.node_online_since = time.time() - 100.0
+    wm.is_node_alive = AsyncMock(return_value=True)
+    wm.mqtt_publisher.publish_shutdown = AsyncMock(return_value=False)
+
+    # First attempt fails
+    triggered = await wm.check_and_trigger_auto_shutdown()
+    assert triggered is False
+    assert wm.last_shutdown_attempt is not None
+    assert wm.mqtt_publisher.publish_shutdown.call_count == 1
+
+    # Immediate second check should be rejected by cooldown
+    triggered_again = await wm.check_and_trigger_auto_shutdown()
+    assert triggered_again is False
+    assert wm.mqtt_publisher.publish_shutdown.call_count == 1  # No second publish attempt
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_shutdown_resets_session_when_node_offline(wake_config, mqtt_config, auto_shutdown_config):
+    """
+    When the node is confirmed offline, active session and online tracking are reset.
+    """
+    wm = WakeManager(
+        wake_config=wake_config,
+        mqtt_config=mqtt_config,
+        auto_shutdown_config=auto_shutdown_config,
+        monitored_backends=[("http://node:8080", "/health")],
+    )
+    wm.start_time = time.time() - 100.0
+    wm.has_active_session = True
+    wm.server_woken = True
+    wm.node_online_since = time.time() - 50.0
+    wm.is_node_alive = AsyncMock(return_value=False)
+
+    triggered = await wm.check_and_trigger_auto_shutdown()
+    assert triggered is False
+    assert wm.has_active_session is False
+    assert wm.server_woken is False
+    assert wm.node_online_since is None
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_shutdown_session_activated_by_record_activity(wake_config, mqtt_config, auto_shutdown_config):
+    """Calling record_activity activates the managed session."""
+    wm = WakeManager(
+        wake_config=wake_config,
+        mqtt_config=mqtt_config,
+        auto_shutdown_config=auto_shutdown_config,
+    )
+    assert wm.has_active_session is False
+    wm.record_activity()
+    assert wm.has_active_session is True
+    assert wm.node_online_since is not None
     await wm.close()
 
 

@@ -45,6 +45,10 @@ class WakeManager:
         self.last_activity: float = time.time()
         self.last_wake_time: Optional[float] = None
         self.last_shutdown_time: Optional[float] = None
+        self.last_shutdown_attempt: Optional[float] = None
+        self.has_active_session: bool = False
+        self.server_woken: bool = False
+        self.node_online_since: Optional[float] = None
         self._shutdown_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._active_sessions: Dict[str, BackendWakeSession] = {}
@@ -59,8 +63,12 @@ class WakeManager:
 
     def record_activity(self) -> None:
         """Record successful operational request activity."""
-        self.last_activity = time.time()
-        logger.debug("Recorded activity at timestamp: %f", self.last_activity)
+        now = time.time()
+        self.last_activity = now
+        self.has_active_session = True
+        if self.node_online_since is None:
+            self.node_online_since = now
+        logger.debug("Recorded activity at timestamp: %f (session marked active)", self.last_activity)
 
     def get_status_info(self, backends: Dict[str, str]) -> Dict:
         """Generate status dictionary for /gateway/status."""
@@ -92,6 +100,9 @@ class WakeManager:
                 "inactivity_threshold": self.auto_shutdown_config.inactivity_threshold,
                 "grace_period": self.auto_shutdown_config.grace_period,
                 "last_shutdown_timestamp": self.last_shutdown_time,
+                "has_active_session": self.has_active_session,
+                "server_woken": self.server_woken,
+                "node_online_since": self.node_online_since,
             }
         if self.mqtt_publisher.last_error:
             status_dict["last_mqtt_error"] = self.mqtt_publisher.last_error
@@ -191,6 +202,10 @@ class WakeManager:
             else self.check_health(backend_url, health_path)
         )
         if is_healthy:
+            now = time.time()
+            self.has_active_session = True
+            if self.node_online_since is None:
+                self.node_online_since = now
             return True, None
 
         logger.info("Backend %s is not reachable. Initiating wake-on-request flow...", backend_url)
@@ -227,8 +242,12 @@ class WakeManager:
         await session.event.wait()
 
         if session.success:
-            self.last_wake_time = time.time()
-            self.last_activity = time.time()
+            now = time.time()
+            self.last_wake_time = now
+            self.last_activity = now
+            self.server_woken = True
+            self.has_active_session = True
+            self.node_online_since = now
             return True, None
         else:
             return False, session.error_message or "Node wake-up timed out."
@@ -288,7 +307,54 @@ class WakeManager:
                 )
                 return False
 
-        # 4. Check inactivity threshold
+        # 4. Check cooldown from previous failed shutdown attempt (prevent tight retry spam)
+        if self.last_shutdown_attempt is not None:
+            retry_cooldown = min(self.auto_shutdown_config.grace_period, 60.0)
+            if now - self.last_shutdown_attempt < retry_cooldown:
+                logger.debug(
+                    "Auto-shutdown: within failed shutdown retry cooldown (%.1fs remaining).",
+                    retry_cooldown - (now - self.last_shutdown_attempt),
+                )
+                return False
+
+        # 5. Verify if the node is ACTUALLY ALIVE.
+        # CRITICAL: Because sending the MQTT message toggles power, sending it when the node
+        # is already OFF would inadvertently turn it ON.
+        is_alive = await self.is_node_alive()
+        if not is_alive:
+            # Node is offline: reset online tracking and active session
+            if self.node_online_since is not None or self.has_active_session or self.server_woken:
+                logger.debug("Auto-shutdown: node is offline. Resetting active session and online tracking.")
+                self.node_online_since = None
+                self.has_active_session = False
+                self.server_woken = False
+            return False
+
+        # Node is online: track when it became online
+        if self.node_online_since is None:
+            self.node_online_since = now
+
+        # 6. Check node uptime grace period
+        node_uptime = now - self.node_online_since
+        if node_uptime < self.auto_shutdown_config.grace_period:
+            logger.debug(
+                "Auto-shutdown: node recently came online (online for %.1fs < grace_period %.1fs).",
+                node_uptime,
+                self.auto_shutdown_config.grace_period,
+            )
+            return False
+
+        # 7. Check if the gateway is managing an active session for this node
+        # If the gateway never started/woke the node and no operational requests were made,
+        # do NOT shut down a node that was started manually outside the gateway!
+        if not self.has_active_session and not self.server_woken:
+            logger.debug(
+                "Auto-shutdown: node is online but not managed by gateway "
+                "(never woken by gateway and no active session). Skipping auto-shutdown."
+            )
+            return False
+
+        # 8. Check inactivity threshold
         inactivity = now - self.last_activity
         if inactivity < self.auto_shutdown_config.inactivity_threshold:
             logger.debug(
@@ -298,26 +364,19 @@ class WakeManager:
             )
             return False
 
-        # 5. Inactivity threshold exceeded! Verify if the node is ACTUALLY ALIVE.
-        # CRITICAL: Because sending the MQTT message toggles power, sending it when the node
-        # is already OFF would inadvertently turn it ON.
-        is_alive = await self.is_node_alive()
-        if not is_alive:
-            logger.debug("Auto-shutdown: node is already offline; no action taken.")
-            return False
-
-        # 6. Node is online and idle threshold exceeded -> publish shutdown signal!
+        # 9. Node is online, managed, and idle threshold exceeded -> publish shutdown signal!
         topic = self.auto_shutdown_config.topic or self.mqtt_config.topic
         payload = self.auto_shutdown_config.payload or self.mqtt_config.payload
 
         logger.warning(
-            "INACTIVITY THRESHOLD EXCEEDED (idle for %.1fs >= %.1fs)! Node is online. "
+            "INACTIVITY THRESHOLD EXCEEDED (idle for %.1fs >= %.1fs)! Node is online and managed. "
             "Publishing auto-shutdown MQTT command to topic '%s'...",
             inactivity,
             self.auto_shutdown_config.inactivity_threshold,
             topic,
         )
 
+        self.last_shutdown_attempt = now
         success = await self.mqtt_publisher.publish_shutdown(
             topic=topic,
             payload=payload,
@@ -326,7 +385,10 @@ class WakeManager:
         if success:
             self.last_shutdown_time = time.time()
             self.last_activity = time.time()
-            logger.info("Auto-shutdown MQTT signal published successfully.")
+            self.has_active_session = False
+            self.server_woken = False
+            self.node_online_since = None
+            logger.info("Auto-shutdown MQTT signal published successfully. Session cleared.")
             return True
         else:
             logger.error(
