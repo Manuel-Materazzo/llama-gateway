@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from gateway.config import AppConfig
+from gateway.mcp_discovery import sync_mcp_server
 from gateway.mcp_transform import get_sanitized_server_tools, transform_mcp_payload
 from gateway.proxy import ProxyHandler
+from gateway.wake_manager import WakeManager
 
 logger = logging.getLogger("llama_gateway.mcp")
 
@@ -25,6 +28,61 @@ def extract_tool_name_from_path(path: str) -> Optional[str]:
     if len(parts) == 2 and parts[1] == "call":
         return parts[0]
     return None
+
+
+@router.post("/mcp/{server_name}/sync", tags=["MCP Discovery"])
+@router.post("/mcp/{server_name}/discover", tags=["MCP Discovery"])
+async def sync_mcp_server_endpoint(
+    server_name: str,
+    request: Request,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    Auto-discover and synchronize tools from upstream MCP server.
+    If server.auto_discover is true (or ?force=true), queries upstream MCP server,
+    merges schemas, updates config.yaml directly, and reloads in-memory tools.
+    """
+    config: AppConfig = request.app.state.config
+    wake_manager: WakeManager = request.app.state.wake_manager
+
+    mcp_config = next((s for s in config.mcp_servers if s.name == server_name), None)
+    if not mcp_config:
+        raise HTTPException(
+            status_code=404,
+            detail=f"MCP server '{server_name}' is not configured.",
+        )
+
+    if not mcp_config.auto_discover and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"MCP server '{server_name}' has auto_discover=false. "
+                "Enable 'auto_discover: true' in config.yaml or pass ?force=true to update."
+            ),
+        )
+
+    config_path = getattr(config, "config_path", None)
+    try:
+        tools = await sync_mcp_server(
+            config=config,
+            server_name=server_name,
+            config_path=config_path,
+            wake_manager=wake_manager,
+            force=force,
+        )
+        return {
+            "status": "ok",
+            "server": server_name,
+            "auto_discover": mcp_config.auto_discover,
+            "tools_count": len(tools),
+            "tools": tools,
+        }
+    except Exception as e:
+        logger.error("Failed to sync MCP server '%s': %s", server_name, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to sync MCP server '{server_name}': {str(e)}",
+        )
 
 
 @router.api_route(
@@ -80,6 +138,14 @@ async def proxy_mcp_request(server_name: str, path: str, request: Request) -> Re
         token = mcp_config.bearer_token.strip()
         auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
         extra_headers["Authorization"] = auth_val
+
+    # Opportunistic sync: if auto_discover is enabled and tools are not yet cached/populated,
+    # trigger background sync since the backend is being contacted.
+    if mcp_config.auto_discover and not mcp_config.tools:
+        config_path = getattr(config, "config_path", None)
+        asyncio.create_task(
+            sync_mcp_server(config, server_name, config_path=config_path, wake_manager=None)
+        )
 
     return await proxy_handler.forward_request(
         request=request,

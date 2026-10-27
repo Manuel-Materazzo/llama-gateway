@@ -9,7 +9,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml
     environment:
       - GATEWAY_CONFIG_PATH=/app/config.yaml
       - PYTHONUNBUFFERED=1

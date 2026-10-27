@@ -16,6 +16,8 @@ mcp_servers:
   - name: "filesystem"
     backend_url: "http://10.10.0.2:8001"
     health_path: "/health"
+    auto_discover: true         # When true: tool definitions are auto-discovered from the MCP server and saved directly here in config.yaml!
+                                # When false: auto-discovery will never overwrite your manual edits in this file.
     bearer_token: null          # Optional: static Bearer token forwarded to upstream server (e.g. "secret-token"). Client Authorization headers are also forwarded if provided.
     tools:
       - name: "read_file"

@@ -37,6 +37,7 @@ class MCPServerConfig(BaseModel):
     backend_url: str
     bearer_token: Optional[str] = None
     health_path: str = "/health"
+    auto_discover: bool = False
     static_tools: List[Dict[str, Any]] = Field(default_factory=list)
     tools: List[Dict[str, Any]] = Field(default_factory=list)
     static_discovery: Optional[Dict[str, Any]] = None
@@ -138,6 +139,7 @@ class AppConfig(BaseModel):
     wake: WakeConfig = Field(default_factory=WakeConfig)
     auto_shutdown: AutoShutdownConfig = Field(default_factory=AutoShutdownConfig)
     watcher: IdleWatcherConfig = Field(default_factory=IdleWatcherConfig)
+    config_path: Optional[str] = None
 
 
 def load_config(config_path: Optional[str | Path] = None) -> AppConfig:
@@ -146,11 +148,13 @@ def load_config(config_path: Optional[str | Path] = None) -> AppConfig:
         config_path = os.environ.get("GATEWAY_CONFIG_PATH", "config.yaml")
 
     path = Path(config_path)
+    actual_path = str(path)
     if not path.is_file():
         # Check if config.example.yaml exists as fallback
         example_path = path.parent / "config.example.yaml"
         if example_path.is_file():
             path = example_path
+            actual_path = str(example_path)
         else:
             # Return default config if no file exists
             return AppConfig()
@@ -158,4 +162,6 @@ def load_config(config_path: Optional[str | Path] = None) -> AppConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw_data = yaml.safe_load(f) or {}
 
-    return AppConfig.model_validate(raw_data)
+    cfg = AppConfig.model_validate(raw_data)
+    cfg.config_path = actual_path
+    return cfg
