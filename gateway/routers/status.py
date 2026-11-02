@@ -43,22 +43,14 @@ async def get_gateway_status(request: Request) -> Dict[str, Any]:
         config.llamacpp.health_path,
     )
     for mcp in config.mcp_servers:
-        mcp_headers = None
-        if mcp.bearer_token:
-            token = mcp.bearer_token.strip()
-            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
-            mcp_headers = {"Authorization": auth_val}
+        mcp_headers = mcp.get_downstream_auth_headers() or None
         health_tasks[f"mcp_{mcp.name}"] = wake_manager.check_health(
             mcp.backend_url,
             mcp.health_path,
             headers=mcp_headers,
         )
     for svc in config.services:
-        svc_headers = None
-        if svc.bearer_token:
-            token = svc.bearer_token.strip()
-            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
-            svc_headers = {"Authorization": auth_val}
+        svc_headers = svc.get_downstream_auth_headers() or None
         health_tasks[f"service_{svc.name}"] = wake_manager.check_health(
             svc.backend_url,
             svc.health_path,

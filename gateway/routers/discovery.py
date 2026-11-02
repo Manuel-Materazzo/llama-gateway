@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from gateway.auth import verify_upstream_auth
 from gateway.config import AppConfig
 from gateway.mcp_transform import get_sanitized_server_tools
 
@@ -46,6 +47,9 @@ async def get_mcp_static_tools(server_name: str, request: Request) -> Dict[str, 
             status_code=404,
             detail=f"MCP server '{server_name}' not configured in gateway.",
         )
+
+    if mcp_config.upstream_auth:
+        verify_upstream_auth(mcp_config.upstream_auth, request)
 
     if mcp_config.static_discovery:
         return mcp_config.static_discovery

@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from gateway.auth import verify_upstream_auth
 from gateway.config import AppConfig
 from gateway.mcp_discovery import sync_mcp_server
 from gateway.mcp_transform import get_sanitized_server_tools, transform_mcp_payload
@@ -51,6 +52,10 @@ async def sync_mcp_server_endpoint(
             status_code=404,
             detail=f"MCP server '{server_name}' is not configured.",
         )
+
+    # Enforce upstream authentication if configured
+    if mcp_config.upstream_auth:
+        verify_upstream_auth(mcp_config.upstream_auth, request)
 
     if not mcp_config.auto_discover and not force:
         raise HTTPException(
@@ -114,6 +119,10 @@ async def proxy_mcp_request(
             detail=f"MCP server '{server_name}' is not configured.",
         )
 
+    # Enforce upstream authentication if configured
+    if mcp_config.upstream_auth:
+        verify_upstream_auth(mcp_config.upstream_auth, request)
+
     server_dict = mcp_config.model_dump()
     body_bytes = await request.body()
 
@@ -143,10 +152,9 @@ async def proxy_mcp_request(
     transformed_body = transform_mcp_payload(server_dict, body_bytes, path_tool_name=path_tool_name)
 
     extra_headers: Dict[str, str] = {}
-    if mcp_config.bearer_token:
-        token = mcp_config.bearer_token.strip()
-        auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
-        extra_headers["Authorization"] = auth_val
+    downstream_auth_headers = mcp_config.get_downstream_auth_headers()
+    if downstream_auth_headers:
+        extra_headers.update(downstream_auth_headers)
 
     # Ensure Accept header includes text/event-stream for Streamable HTTP servers
     req_accept = request.headers.get("accept", "")
@@ -155,6 +163,11 @@ async def proxy_mcp_request(
             extra_headers["Accept"] = f"{req_accept}, text/event-stream"
         else:
             extra_headers["Accept"] = "application/json, text/event-stream"
+
+    # Avoid leaking upstream client credentials downstream
+    strip_headers: List[str] = []
+    if mcp_config.upstream_auth:
+        strip_headers = mcp_config.upstream_auth.get_consumed_header_names()
 
     # Opportunistic sync: if auto_discover is enabled and tools are not yet cached/populated,
     # trigger background sync since the backend is being contacted.
@@ -171,4 +184,5 @@ async def proxy_mcp_request(
         health_path=mcp_config.health_path,
         override_body=transformed_body,
         extra_headers=extra_headers if extra_headers else None,
+        strip_headers=strip_headers if strip_headers else None,
     )

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
+from gateway.auth import verify_upstream_auth
 from gateway.config import AppConfig, WebServiceConfig
 from gateway.proxy import ProxyHandler
 from gateway.waiting_page import render_services_catalog, render_waiting_page
@@ -18,7 +19,11 @@ logger = logging.getLogger("llama_gateway.services")
 
 
 def _get_service_auth_headers(service: WebServiceConfig) -> Optional[Dict[str, str]]:
-    """Format authorization header if bearer_token is configured."""
+    """Format authorization headers if downstream auth or bearer_token is configured."""
+    if hasattr(service, "get_downstream_auth_headers"):
+        h = service.get_downstream_auth_headers()
+        if h:
+            return h
     if not service.bearer_token:
         return None
     token = service.bearer_token.strip()
@@ -52,6 +57,10 @@ async def handle_service_request(
     config: AppConfig = request.app.state.config
     wake_manager: WakeManager = request.app.state.wake_manager
     proxy_handler: ProxyHandler = request.app.state.proxy_handler
+
+    # Enforce upstream client authentication if configured
+    if service.upstream_auth:
+        verify_upstream_auth(service.upstream_auth, request)
 
     prefix = service.effective_path_prefix
     clean_subpath = subpath.lstrip("/")
@@ -166,12 +175,17 @@ async def handle_service_request(
     if auth_headers:
         extra_headers.update(auth_headers)
 
+    strip_headers: List[str] = []
+    if service.upstream_auth:
+        strip_headers = service.upstream_auth.get_consumed_header_names()
+
     return await proxy_handler.forward_request(
         request=request,
         backend_url=service.backend_url,
         path=clean_subpath,
         health_path=service.health_path,
         extra_headers=extra_headers,
+        strip_headers=strip_headers if strip_headers else None,
     )
 
 

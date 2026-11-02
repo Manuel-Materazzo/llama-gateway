@@ -39,11 +39,14 @@ def is_streaming_request(request: Request, body_bytes: bytes) -> bool:
 def build_forward_headers(
     request: Request,
     extra_headers: Optional[Dict[str, str]] = None,
+    strip_headers: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     """Construct sanitized headers for forwarding to upstream backend."""
     forward_headers = {}
+    strip_set = {s.lower() for s in (strip_headers or [])}
     for key, value in request.headers.items():
-        if key.lower() not in EXCLUDED_REQUEST_HEADERS:
+        k_lower = key.lower()
+        if k_lower not in EXCLUDED_REQUEST_HEADERS and k_lower not in strip_set:
             forward_headers[key] = value
 
     if extra_headers:
@@ -173,6 +176,7 @@ class ProxyHandler:
         health_path: str = "/health",
         override_body: Optional[bytes] = None,
         extra_headers: Optional[Dict[str, str]] = None,
+        strip_headers: Optional[List[str]] = None,
     ) -> Response:
         """Forward an HTTP request to the target backend with wake-on-request."""
         body_bytes = override_body if override_body is not None else await request.body()
@@ -180,13 +184,17 @@ class ProxyHandler:
         clean_path = path.lstrip("/")
         target_url = f"{clean_backend}/{clean_path}" if clean_path else clean_backend
 
-        forward_headers = build_forward_headers(request, extra_headers=extra_headers)
+        forward_headers = build_forward_headers(
+            request,
+            extra_headers=extra_headers,
+            strip_headers=strip_headers,
+        )
         params = dict(request.query_params)
         is_stream = is_streaming_request(request, body_bytes)
 
         health_headers = None
         if extra_headers:
-            health_headers = {k: v for k, v in extra_headers.items() if k.lower() == "authorization"}
+            health_headers = {k: v for k, v in extra_headers.items() if k.lower() != "accept"}
         elif "authorization" in forward_headers:
             health_headers = {"authorization": forward_headers["authorization"]}
 

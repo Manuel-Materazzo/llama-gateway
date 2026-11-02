@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from gateway.auth import AuthConfig
+
 
 class ServerConfig(BaseModel):
     """HTTP Server configuration."""
@@ -36,6 +38,8 @@ class MCPServerConfig(BaseModel):
     name: str
     backend_url: str
     bearer_token: Optional[str] = None
+    downstream_auth: Optional[AuthConfig] = None
+    upstream_auth: Optional[AuthConfig] = None
     health_path: str = "/health"
     auto_discover: bool = False
     static_tools: List[Dict[str, Any]] = Field(default_factory=list)
@@ -47,12 +51,41 @@ class MCPServerConfig(BaseModel):
     def remap_token_aliases(cls, data: Any) -> Any:
         if isinstance(data, dict):
             d = dict(data)
+
+            # Downstream auth aliases
+            if "auth" in d and "downstream_auth" not in d:
+                d["downstream_auth"] = d["auth"]
+            elif "backend_auth" in d and "downstream_auth" not in d:
+                d["downstream_auth"] = d["backend_auth"]
+
+            # Upstream auth aliases
+            if "client_auth" in d and "upstream_auth" not in d:
+                d["upstream_auth"] = d["client_auth"]
+
+            # Token aliases
             if "token" in d and "bearer_token" not in d:
                 d["bearer_token"] = d["token"]
             elif "auth_token" in d and "bearer_token" not in d:
                 d["bearer_token"] = d["auth_token"]
+
+            # Synchronize bearer_token and downstream_auth
+            if d.get("bearer_token") and not d.get("downstream_auth"):
+                d["downstream_auth"] = {"type": "bearer", "token": d["bearer_token"]}
+            elif d.get("downstream_auth") and isinstance(d["downstream_auth"], dict):
+                if d["downstream_auth"].get("type") == "bearer" and "bearer_token" not in d:
+                    d["bearer_token"] = d["downstream_auth"].get("token")
             return d
         return data
+
+    def get_downstream_auth_headers(self) -> Dict[str, str]:
+        """Get headers to pass to downstream MCP server for auth."""
+        if self.downstream_auth:
+            return self.downstream_auth.get_headers()
+        if self.bearer_token:
+            token = self.bearer_token.strip()
+            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            return {"Authorization": auth_val}
+        return {}
 
 
 from urllib.parse import urlparse
@@ -90,6 +123,8 @@ class WebServiceConfig(BaseModel):
     description: Optional[str] = None
     icon: Optional[str] = None
     bearer_token: Optional[str] = None
+    downstream_auth: Optional[AuthConfig] = None
+    upstream_auth: Optional[AuthConfig] = None
     wake_node: Optional[bool] = None  # None = auto-detect from backend_url; False = skip physical node wake
     wake: Optional[WebServiceWakeConfig] = None
 
@@ -98,10 +133,28 @@ class WebServiceConfig(BaseModel):
     def remap_service_aliases(cls, data: Any) -> Any:
         if isinstance(data, dict):
             d = dict(data)
+
+            # Downstream auth aliases
+            if "auth" in d and "downstream_auth" not in d:
+                d["downstream_auth"] = d["auth"]
+            elif "backend_auth" in d and "downstream_auth" not in d:
+                d["downstream_auth"] = d["backend_auth"]
+
+            # Upstream auth aliases
+            if "client_auth" in d and "upstream_auth" not in d:
+                d["upstream_auth"] = d["client_auth"]
+
             if "token" in d and "bearer_token" not in d:
                 d["bearer_token"] = d["token"]
             elif "auth_token" in d and "bearer_token" not in d:
                 d["bearer_token"] = d["auth_token"]
+
+            # Synchronize bearer_token and downstream_auth
+            if d.get("bearer_token") and not d.get("downstream_auth"):
+                d["downstream_auth"] = {"type": "bearer", "token": d["bearer_token"]}
+            elif d.get("downstream_auth") and isinstance(d["downstream_auth"], dict):
+                if d["downstream_auth"].get("type") == "bearer" and "bearer_token" not in d:
+                    d["bearer_token"] = d["downstream_auth"].get("token")
 
             if "skip_node_wake" in d and "wake_node" not in d:
                 d["wake_node"] = not d["skip_node_wake"]
@@ -111,6 +164,16 @@ class WebServiceConfig(BaseModel):
                 d["wake_node"] = bool(d["remote"])
             return d
         return data
+
+    def get_downstream_auth_headers(self) -> Dict[str, str]:
+        """Get headers to pass to downstream service for auth."""
+        if self.downstream_auth:
+            return self.downstream_auth.get_headers()
+        if self.bearer_token:
+            token = self.bearer_token.strip()
+            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            return {"Authorization": auth_val}
+        return {}
 
     @property
     def should_wake_node(self) -> bool:

@@ -62,6 +62,7 @@ async def fetch_tools_from_mcp_server(
     bearer_token: Optional[str] = None,
     timeout: float = 10.0,
     client: Optional[httpx.AsyncClient] = None,
+    auth_headers: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Query an upstream MCP server for its list of exposed tools.
@@ -73,7 +74,9 @@ async def fetch_tools_from_mcp_server(
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    if bearer_token:
+    if auth_headers:
+        headers.update(auth_headers)
+    elif bearer_token:
         token = bearer_token.strip()
         auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
         headers["Authorization"] = auth_val
@@ -354,17 +357,17 @@ async def sync_mcp_server(
         )
 
     # Wake backend if wake_manager is provided
-    if wake_manager is not None:
-        auth_header = None
-        if server_cfg.bearer_token:
-            token = server_cfg.bearer_token.strip()
-            auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
-            auth_header = {"Authorization": auth_val}
+    auth_headers = server_cfg.get_downstream_auth_headers() if hasattr(server_cfg, "get_downstream_auth_headers") else None
+    if not auth_headers and server_cfg.bearer_token:
+        token = server_cfg.bearer_token.strip()
+        auth_val = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        auth_headers = {"Authorization": auth_val}
 
+    if wake_manager is not None:
         success, err_msg = await wake_manager.ensure_awake(
             server_cfg.backend_url,
             health_path=server_cfg.health_path,
-            headers=auth_header,
+            headers=auth_headers or None,
         )
         if not success:
             raise RuntimeError(f"Could not reach MCP server '{server_name}': {err_msg}")
@@ -373,6 +376,7 @@ async def sync_mcp_server(
     raw_discovered = await fetch_tools_from_mcp_server(
         backend_url=server_cfg.backend_url,
         bearer_token=server_cfg.bearer_token,
+        auth_headers=auth_headers or None,
     )
 
     merged_tools = merge_tools_with_existing(server_cfg.tools, raw_discovered)
@@ -391,10 +395,24 @@ async def _run_cli(args: argparse.Namespace) -> int:
     """CLI execution handler."""
     if args.url:
         print(f"Discovering tools from {args.url}...")
+        url_auth_headers: Dict[str, str] = {}
+        basic_auth = getattr(args, "basic_auth", None)
+        if basic_auth:
+            import base64
+            encoded = base64.b64encode(basic_auth.encode("utf-8")).decode("ascii")
+            url_auth_headers["Authorization"] = f"Basic {encoded}"
+        header_list = getattr(args, "header", None)
+        if header_list:
+            for h in header_list:
+                if ":" in h:
+                    k, v = h.split(":", 1)
+                    url_auth_headers[k.strip()] = v.strip()
+
         try:
             tools = await fetch_tools_from_mcp_server(
                 backend_url=args.url,
                 bearer_token=args.token,
+                auth_headers=url_auth_headers if url_auth_headers else None,
             )
             print(f"Successfully discovered {len(tools)} tools:")
             yaml_out = yaml.safe_dump(tools, sort_keys=False, default_flow_style=False)
@@ -435,9 +453,11 @@ async def _run_cli(args: argparse.Namespace) -> int:
                 print(f"Skipping '{s_name}' because auto_discover=false (use --force to override).")
                 continue
 
+            auth_headers = target_srv.get_downstream_auth_headers() if hasattr(target_srv, "get_downstream_auth_headers") else None
             raw_tools = await fetch_tools_from_mcp_server(
                 backend_url=target_srv.backend_url,
                 bearer_token=target_srv.bearer_token,
+                auth_headers=auth_headers,
             )
             merged = merge_tools_with_existing(target_srv.tools, raw_tools)
             print(f"Discovered {len(merged)} tools for '{s_name}'.")
@@ -467,6 +487,8 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Sync all servers with auto_discover: true")
     parser.add_argument("--url", help="Direct MCP server URL to probe")
     parser.add_argument("--token", help="Bearer token for MCP server (used with --url)")
+    parser.add_argument("--basic-auth", help="Basic auth username:password for MCP server (used with --url)")
+    parser.add_argument("--header", "-H", action="append", help="Custom header 'Name: Value' (can be repeated, used with --url)")
     parser.add_argument("--force", "-f", action="store_true", help="Force discovery and YAML update even if auto_discover=false")
     parser.add_argument("--dry-run", action="store_true", help="Print discovered YAML tools without updating config.yaml")
 

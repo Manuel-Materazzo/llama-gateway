@@ -18,7 +18,35 @@ mcp_servers:
     health_path: "/health"
     auto_discover: true         # When true: tool definitions are auto-discovered from the MCP server and saved directly here in config.yaml!
                                 # When false: auto-discovery will never overwrite your manual edits in this file.
-    bearer_token: null          # Optional: static Bearer token forwarded to upstream server (e.g. "secret-token"). Client Authorization headers are also forwarded if provided.
+    
+    # --------------------------------------------------------------------------
+    # Auth Middleware Configuration (Upstream & Downstream Authentication)
+    # The Gateway acts as an authentication adapter / bridge between client and MCP server:
+    # --------------------------------------------------------------------------
+    # 1. upstream_auth (or client_auth): required from the client (e.g. Open WebUI, agent)
+    #    so the gateway endpoint is never unprotected.
+    upstream_auth:
+      type: "bearer"            # "bearer", "basic", "header" / "api_key", "none"
+      token: "gateway-client-secret-token"
+
+    # 2. downstream_auth (or backend_auth): credentials injected by the Gateway when
+    #    forwarding requests, health checks, and discovery to the downstream MCP server.
+    #    Allows using downstream MCP servers requiring Basic auth, custom headers, or Bearer tokens
+    #    even if the client does not support them!
+    downstream_auth:
+      type: "basic"             # e.g. downstream MCP requires HTTP Basic auth
+      username: "mcp_admin"
+      password: "mcp_secret_password"
+      # OR Bearer token:
+      # type: "bearer"
+      # token: "downstream-secret-token"
+      # OR Custom Header / API Key:
+      # type: "api_key"
+      # header: "X-API-Key"
+      # value: "my-mcp-api-key"
+
+    # Legacy alias: bearer_token (still supported for backwards compatibility)
+    # bearer_token: "secret-token"
     tools:
       - name: "read_file"
         description: "Read the contents of a file in the allowed workspace"
