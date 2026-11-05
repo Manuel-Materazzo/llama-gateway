@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator, Dict, Optional
+import time
+from typing import Any, AsyncGenerator, Dict, List, Optional
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
@@ -34,6 +35,102 @@ def is_streaming_request(request: Request, body_bytes: bytes) -> bool:
             pass
 
     return False
+
+
+def has_return_progress(request: Request, body_bytes: bytes) -> bool:
+    """Check if the incoming request asks for prompt/server progress updates."""
+    # Check query params (e.g. ?return_progress=true)
+    val = request.query_params.get("return_progress")
+    if val is not None and str(val).lower() in ("true", "1", "yes"):
+        return True
+
+    # Check custom header (e.g. X-Return-Progress: true)
+    hdr = request.headers.get("x-return-progress")
+    if hdr is not None and hdr.lower() in ("true", "1", "yes"):
+        return True
+
+    # Check JSON payload: root field or nested extra_body (OpenAI SDK pattern)
+    if body_bytes:
+        try:
+            data = json.loads(body_bytes.decode("utf-8"))
+            if isinstance(data, dict):
+                rp = data.get("return_progress")
+                if rp is True or str(rp).lower() in ("true", "1", "yes"):
+                    return True
+                extra = data.get("extra_body")
+                if isinstance(extra, dict):
+                    erp = extra.get("return_progress")
+                    if erp is True or str(erp).lower() in ("true", "1", "yes"):
+                        return True
+        except Exception:
+            pass
+
+    return False
+
+
+def extract_model_from_body(body_bytes: bytes, default: str = "local-model") -> str:
+    """Extract model name from request body if present."""
+    if body_bytes:
+        try:
+            data = json.loads(body_bytes.decode("utf-8"))
+            if isinstance(data, dict) and "model" in data and isinstance(data["model"], str):
+                return data["model"]
+        except Exception:
+            pass
+    return default
+
+
+def format_progress_chunk(
+    model: str,
+    is_chat: bool,
+    stage: str,
+    status_msg: str,
+    elapsed: float,
+    progress_pct: int,
+) -> bytes:
+    """Format an SSE chat/completion chunk with prompt_progress and server status."""
+    time_ms = int(elapsed * 1000)
+    progress_data = {
+        "total": 100,
+        "processed": max(0, min(100, int(progress_pct))),
+        "cache": 0,
+        "time_ms": time_ms,
+    }
+    if is_chat:
+        chunk = {
+            "id": "chatcmpl-gateway-wake",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": None,
+                }
+            ],
+            "stage": stage,
+            "status": status_msg,
+            "prompt_progress": progress_data,
+        }
+    else:
+        chunk = {
+            "id": "cmpl-gateway-wake",
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "",
+                    "finish_reason": None,
+                }
+            ],
+            "stage": stage,
+            "status": status_msg,
+            "prompt_progress": progress_data,
+        }
+    return f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
 
 
 def build_forward_headers(
@@ -86,9 +183,12 @@ class ProxyHandler:
         params: Dict[str, str],
         body_bytes: bytes,
         health_headers: Optional[Dict[str, str]] = None,
+        return_progress: bool = False,
+        model_name: str = "local-model",
+        is_chat: bool = True,
     ) -> AsyncGenerator[bytes, None]:
         """
-        Streaming generator that handles keep-alive during wake-up,
+        Streaming generator that handles keep-alive and optional progress updates during wake-up,
         then streams the upstream response.
         """
         # Check initial reachability
@@ -99,7 +199,12 @@ class ProxyHandler:
         )
 
         if not is_healthy:
-            logger.info("Streaming request detected offline backend %s. Starting wake-up with SSE keep-alive...", backend_url)
+            logger.info(
+                "Streaming request detected offline backend %s (return_progress=%s). Starting wake-up...",
+                backend_url,
+                return_progress,
+            )
+            wake_start_time = time.time()
             # Start wake task
             wake_task = asyncio.create_task(
                 self.wake_manager.ensure_awake(backend_url, health_path, headers=health_headers)
@@ -108,16 +213,48 @@ class ProxyHandler:
             )
 
             keep_alive_interval = self.wake_manager.wake_config.keep_alive_interval
+            update_interval = min(keep_alive_interval, 2.0) if return_progress else keep_alive_interval
+            estimated_boot = getattr(self.wake_manager.wake_config, "estimated_boot_duration", 45.0)
+
+            # Send initial progress chunk immediately if requested
+            if return_progress:
+                yield format_progress_chunk(
+                    model=model_name,
+                    is_chat=is_chat,
+                    stage="starting",
+                    status_msg="Wake-up sequence initiated...",
+                    elapsed=0.0,
+                    progress_pct=5,
+                )
 
             while not wake_task.done():
-                # Send SSE comment to keep connection alive
-                yield b": keep-alive\n\n"
                 try:
-                    await asyncio.wait_for(asyncio.shield(wake_task), timeout=keep_alive_interval)
+                    await asyncio.wait_for(asyncio.shield(wake_task), timeout=update_interval)
                 except asyncio.TimeoutError:
-                    continue
+                    pass
                 except Exception:
                     break
+
+                if wake_task.done():
+                    break
+
+                if return_progress:
+                    elapsed = max(0.0, time.time() - wake_start_time)
+                    session = self.wake_manager.get_wake_session(backend_url)
+                    stage = session.phase if session else "booting"
+                    status_msg = session.message if session else f"Waiting for server to boot ({elapsed:.0f}s elapsed)..."
+                    progress_pct = min(92, max(5, int(5 + (elapsed / estimated_boot) * 85)))
+                    yield format_progress_chunk(
+                        model=model_name,
+                        is_chat=is_chat,
+                        stage=stage,
+                        status_msg=status_msg,
+                        elapsed=elapsed,
+                        progress_pct=progress_pct,
+                    )
+                else:
+                    # Send SSE comment to keep connection alive
+                    yield b": keep-alive\n\n"
 
             success, error_msg = await wake_task
             if not success:
@@ -132,6 +269,17 @@ class ProxyHandler:
                 yield f"data: {json.dumps(error_payload)}\n\n".encode("utf-8")
                 yield b"data: [DONE]\n\n"
                 return
+
+            if return_progress:
+                total_elapsed = max(0.0, time.time() - wake_start_time)
+                yield format_progress_chunk(
+                    model=model_name,
+                    is_chat=is_chat,
+                    stage="ready",
+                    status_msg="Server is ready! Initializing inference...",
+                    elapsed=total_elapsed,
+                    progress_pct=100,
+                )
 
         # Upstream is healthy: stream real response
         logger.info("Forwarding streaming request to %s", target_url)
@@ -191,6 +339,21 @@ class ProxyHandler:
         )
         params = dict(request.query_params)
         is_stream = is_streaming_request(request, body_bytes)
+        return_progress = has_return_progress(request, body_bytes)
+        model_name = extract_model_from_body(body_bytes, default="local-model")
+        clean_path_lower = path.lower()
+        is_chat = not (clean_path_lower.endswith("/completions") and not clean_path_lower.endswith("/chat/completions"))
+
+        # If return_progress requested, ensure upstream llama.cpp also receives return_progress: true in JSON body
+        forward_body = body_bytes
+        if return_progress and forward_body:
+            try:
+                data = json.loads(forward_body.decode("utf-8"))
+                if isinstance(data, dict) and not data.get("return_progress"):
+                    data["return_progress"] = True
+                    forward_body = json.dumps(data).encode("utf-8")
+            except Exception:
+                pass
 
         health_headers = None
         if extra_headers:
@@ -199,7 +362,7 @@ class ProxyHandler:
             health_headers = {"authorization": forward_headers["authorization"]}
 
         if is_stream:
-            # Handle streaming response with SSE keep-alive support
+            # Handle streaming response with SSE keep-alive and return_progress support
             return StreamingResponse(
                 self._stream_with_wake(
                     target_url=target_url,
@@ -208,8 +371,11 @@ class ProxyHandler:
                     method=request.method,
                     headers=forward_headers,
                     params=params,
-                    body_bytes=body_bytes,
+                    body_bytes=forward_body,
                     health_headers=health_headers,
+                    return_progress=return_progress,
+                    model_name=model_name,
+                    is_chat=is_chat,
                 ),
                 media_type="text/event-stream",
                 headers={

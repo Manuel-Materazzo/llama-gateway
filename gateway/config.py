@@ -243,6 +243,7 @@ class WakeConfig(BaseModel):
     polling_interval: float = 2.0
     max_timeout: float = 120.0
     keep_alive_interval: float = 5.0
+    estimated_boot_duration: float = 45.0
 
 
 class AutoShutdownConfig(BaseModel):

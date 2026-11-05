@@ -169,6 +169,7 @@ wake:
   polling_interval: 2.0       # Seconds between reachability checks during wake-up
   max_timeout: 120.0          # Max seconds to wait for boot before returning HTTP 503
   keep_alive_interval: 5.0    # Seconds between SSE keep-alive comments (: keep-alive\n\n)
+  estimated_boot_duration: 45.0 # Estimated seconds for server startup (progress tracking when return_progress: true)
 
 # Auto-shutdown configuration (managed directly by the Gateway in cloud, zero-install on GPU node)
 # Automatically publishes an MQTT message to shut down the node after inactivity.
