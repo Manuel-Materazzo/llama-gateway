@@ -117,7 +117,7 @@ homelab/cloud environments.
 
 
 * **Customizable Wake Triggers & Safe Power Signaling**:
-* **Safe Physical Power Wake**: Before dispatching a physical power button signal (MQTT relay toggle), the Gateway verifies whether the physical server is already online (via active backend checks, ICMP ping, or optional TCP port probe). If the server is already running, the power signal is safely suppressed to prevent accidental power-off cycles!
+* **Safe Physical Power Wake (`safe_power_toggle`)**: For physical power relays wired to the PC's power button pins (which would toggle power off if triggered while running), the Gateway verifies whether the physical server host is already online (via active backend checks on the target host, optional TCP port probe, or ICMP ping). If online, the power signal is safely suppressed to prevent accidental power-off cycles. For idempotent power commands (Home Assistant switch `turn_on`, Wake-on-LAN, smart plugs), set `safe_power_toggle: false` to ensure the wake command is always dispatched when the service is unreachable.
 * **Boot-Aware Service Dispatch**: When waking a sleeping server, custom service wake commands (MQTT topics or webhooks) are held until the server machine has completed booting and is reachable over the network.
 * **Connection Grace Delay & Retries**: Includes a configurable post-boot delay (`delay: 2.0s`) allowing MQTT daemons on the node to establish broker subscriptions, plus automatic retries (`retry_interval: 5.0s`, `max_retries: 3`) if the service takes time to start.
 * **MQTT Retain Support**: Supports `mqtt_retain: true` so the broker immediately delivers the startup command to daemons the moment they subscribe.
@@ -296,9 +296,10 @@ wake:
   max_timeout: 120.0          # Max timeout before returning HTTP 503
   keep_alive_interval: 5.0    # SSE keep-alive comment interval
   estimated_boot_duration: 45.0 # Estimated boot seconds for progress calculations with return_progress: true
-  ping_check: true            # Check ICMP ping to verify if physical server is already online before toggling power
+  ping_check: true            # Check ICMP ping to verify if physical server is already online (set to false if motherboard NIC responds in ACPI S5 standby)
   node_host: null             # Optional: explicit host/IP of the node (otherwise parsed from backend_url)
-  tcp_probe_port: null        # Optional: TCP port to probe on the host (e.g. 22 for SSH)
+  tcp_probe_port: null        # Optional: TCP port to probe on the host (e.g. 22 for SSH) to detect OS boot
+  safe_power_toggle: true     # Set false if using idempotent power switches (Home Assistant, WoL, smart plugs) so wake is not suppressed
 
 # Centralized auto-shutdown managed by the Gateway via MQTT (recommended: zero footprint on GPU node)
 auto_shutdown:

@@ -57,7 +57,7 @@ async def ping_host(host: str, timeout: float = 1.0) -> bool:
 async def probe_tcp(host: str, port: int, timeout: float = 1.0) -> bool:
     """
     Check if a TCP port on a host responds.
-    If connection succeeds or is refused (RST received), the host OS network stack is active.
+    Returns True only if the TCP connection handshake succeeds.
     """
     if not host or is_local_url(f"http://{host}"):
         return True
@@ -69,11 +69,6 @@ async def probe_tcp(host: str, port: int, timeout: float = 1.0) -> bool:
         writer.close()
         await writer.wait_closed()
         return True
-    except ConnectionRefusedError:
-        # Host TCP stack actively rejected connection with RST -> Host machine is alive!
-        return True
-    except (asyncio.TimeoutError, OSError):
-        return False
     except Exception:
         return False
 
@@ -346,11 +341,12 @@ class WakeManager:
         headers: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
-        Check whether the physical server/node is already powered on.
+        Check whether the physical server/node for a specific backend is already powered on.
         Checks:
-        1. Whether the target backend or any monitored backend is reachable via HTTP health check.
-        2. Whether the host responds to ICMP ping (if enabled).
-        3. Whether the host responds to TCP port probe (if configured).
+        1. Whether the target backend is reachable via HTTP health check.
+        2. Whether any sibling monitored backend on the SAME host is reachable via HTTP health check.
+        3. Whether the host responds to TCP port probe (if configured, e.g. SSH port 22).
+        4. Whether the host responds to ICMP ping (if enabled).
         """
         # Fast path 1: Check target backend
         if backend_url:
@@ -360,11 +356,8 @@ class WakeManager:
                 else self.check_health(backend_url, health_path)
             )
             if is_up:
+                logger.info("Server for %s is online (target backend responded to health check)", backend_url)
                 return True
-
-        # Fast path 2: Check any other monitored HTTP backend
-        if await self.is_node_alive():
-            return True
 
         # Extract target host
         host = None
@@ -392,17 +385,34 @@ class WakeManager:
         if is_local_url(f"http://{host}"):
             return True
 
-        # 2. Ping check
-        if getattr(self.wake_config, "ping_check", True):
-            is_pingable = await ping_host(
-                host,
-                timeout=min(1.5, self.wake_config.health_check_timeout),
-            )
-            if is_pingable:
-                logger.debug("Server host %s responded to ICMP ping (server is alive)", host)
-                return True
+        # Fast path 2: Check other monitored HTTP backends on the SAME physical host
+        sibling_backends = []
+        for item in self.monitored_backends:
+            b_url = item[0]
+            b_path = item[1]
+            b_headers = item[2] if len(item) > 2 else None
+            try:
+                b_host = urlparse(b_url).hostname
+            except Exception:
+                b_host = None
+            if b_host and b_host.lower() == host.lower():
+                # Skip duplicate check of target backend_url
+                if backend_url and b_url.rstrip("/") == backend_url.rstrip("/") and b_path == health_path:
+                    continue
+                sibling_backends.append((b_url, b_path, b_headers))
 
-        # 3. TCP probe if configured
+        if sibling_backends:
+            tasks = [
+                self.check_health(u, p, headers=h)
+                for u, p, h in sibling_backends
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for (u, _, _), res in zip(sibling_backends, results):
+                if res is True:
+                    logger.info("Server host %s is online (sibling backend %s responded)", host, u)
+                    return True
+
+        # 3. TCP probe if configured (e.g. port 22 for SSH)
         tcp_port = getattr(self.wake_config, "tcp_probe_port", None)
         if tcp_port:
             is_tcp_alive = await probe_tcp(
@@ -411,11 +421,21 @@ class WakeManager:
                 timeout=min(1.5, self.wake_config.health_check_timeout),
             )
             if is_tcp_alive:
-                logger.debug(
-                    "Server host %s responded to TCP probe on port %d (server is alive)",
+                logger.info(
+                    "Server host %s is online (TCP probe on port %d responded)",
                     host,
                     tcp_port,
                 )
+                return True
+
+        # 4. ICMP Ping check if enabled
+        if getattr(self.wake_config, "ping_check", True):
+            is_pingable = await ping_host(
+                host,
+                timeout=min(1.5, self.wake_config.health_check_timeout),
+            )
+            if is_pingable:
+                logger.info("Server host %s is online (responded to ICMP ping)", host)
                 return True
 
         return False
@@ -467,6 +487,30 @@ class WakeManager:
             # Phase A: If server machine was sleeping and custom service wake hasn't been dispatched yet:
             if needs_server_wake and not custom_wake_sent:
                 server_up = await self.is_server_alive(backend_url, health_path, headers=headers)
+
+                # Fallback: If no host probes (ping/TCP) are configured, or host probe times out after fallback limit:
+                has_host_probes = (
+                    getattr(self.wake_config, "ping_check", True)
+                    or getattr(self.wake_config, "tcp_probe_port", None) is not None
+                )
+                fallback_limit = min(self.wake_config.estimated_boot_duration, 45.0)
+
+                if not server_up and (not has_host_probes and elapsed >= wake_delay):
+                    logger.info(
+                        "No direct host OS probes (ping/TCP) configured for %s. Server machine assumed online after delay (elapsed=%.1fs >= delay=%.1fs). Triggering service wake...",
+                        backend_url,
+                        elapsed,
+                        wake_delay,
+                    )
+                    server_up = True
+                elif not server_up and elapsed >= fallback_limit:
+                    logger.warning(
+                        "Server host probe for %s did not detect host online after %.1fs. Proceeding to service wake as fallback...",
+                        backend_url,
+                        elapsed,
+                    )
+                    server_up = True
+
                 if not server_up:
                     session.update_status("booting", f"Waiting for server machine to boot ({elapsed:.0f}s elapsed)...")
                     continue
@@ -590,8 +634,17 @@ class WakeManager:
 
         if should_start_wake:
             server_already_up = False
+            safe_toggle = getattr(self.wake_config, "safe_power_toggle", True)
+            if wake_config and getattr(wake_config, "safe_power_toggle", None) is not None:
+                safe_toggle = wake_config.safe_power_toggle
+
             if wake_node:
-                server_already_up = await self.is_server_alive(backend_url, health_path, headers=headers)
+                if safe_toggle:
+                    server_already_up = await self.is_server_alive(backend_url, health_path, headers=headers)
+                else:
+                    # When safe_power_toggle is False (idempotent power controls like Home Assistant, WoL, smart plugs),
+                    # always dispatch node wake signal when the service is offline!
+                    server_already_up = False
 
             needs_server_wake = wake_node and not server_already_up
 

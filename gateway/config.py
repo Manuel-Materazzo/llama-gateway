@@ -114,6 +114,7 @@ class WebServiceWakeConfig(BaseModel):
     delay: float = 2.0  # Seconds to wait after server machine is online before sending wake command
     retry_interval: float = 5.0  # Seconds between retry attempts while waiting for service to come up
     max_retries: int = 3  # Maximum number of times to send the service startup command
+    safe_power_toggle: Optional[bool] = None  # None = inherit global wake.safe_power_toggle
 
     @model_validator(mode="before")
     @classmethod
@@ -132,6 +133,12 @@ class WebServiceWakeConfig(BaseModel):
                 d["retry_interval"] = d["resend_interval"]
             if "retries" in d and "max_retries" not in d:
                 d["max_retries"] = d["retries"]
+            if "safe_wake" in d and "safe_power_toggle" not in d:
+                d["safe_power_toggle"] = d["safe_wake"]
+            elif "suppress_wake_if_online" in d and "safe_power_toggle" not in d:
+                d["safe_power_toggle"] = d["suppress_wake_if_online"]
+            elif "power_toggle" in d and "safe_power_toggle" not in d:
+                d["safe_power_toggle"] = d["power_toggle"]
             return d
         return data
 
@@ -272,6 +279,7 @@ class WakeConfig(BaseModel):
     ping_check: bool = True  # Check if host responds to ICMP ping before sending physical power wake
     node_host: Optional[str] = None  # Optional explicit host/IP of the node (otherwise parsed from backend_url)
     tcp_probe_port: Optional[int] = None  # Optional TCP port to probe on the host (e.g. 22 for SSH)
+    safe_power_toggle: bool = True  # If True, suppresses physical power wake when server is already online (for toggle-button relays). If False, always dispatches physical node wake when service is down (for idempotent switches like Home Assistant, WoL, smart plugs).
 
     @model_validator(mode="before")
     @classmethod
@@ -282,6 +290,12 @@ class WakeConfig(BaseModel):
                 d["ping_check"] = d["check_ping"]
             if "host" in d and "node_host" not in d:
                 d["node_host"] = d["host"]
+            if "safe_wake" in d and "safe_power_toggle" not in d:
+                d["safe_power_toggle"] = d["safe_wake"]
+            elif "suppress_wake_if_online" in d and "safe_power_toggle" not in d:
+                d["safe_power_toggle"] = d["suppress_wake_if_online"]
+            elif "power_toggle" in d and "safe_power_toggle" not in d:
+                d["safe_power_toggle"] = d["power_toggle"]
             return d
         return data
 

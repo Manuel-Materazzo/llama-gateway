@@ -146,3 +146,77 @@ async def test_is_server_alive_detection(wake_config, mqtt_config):
 
     await wm.close()
 
+
+@pytest.mark.asyncio
+async def test_is_server_alive_isolates_different_hosts(wake_config, mqtt_config):
+    """
+    CRITICAL: Ensure is_server_alive ONLY checks backends on the SAME physical host.
+    A healthy backend on hostA (10.10.0.2) must NOT falsely indicate that hostB (192.168.1.115) is online!
+    """
+    wm = WakeManager(
+        wake_config,
+        mqtt_config,
+        monitored_backends=[
+            ("http://10.10.0.2:8080", "/health"),
+            ("http://192.168.1.115:8200", "/health"),
+        ],
+    )
+
+    # 10.10.0.2 is online, but 192.168.1.115 is offline
+    async def mock_health(url, path="/health", headers=None):
+        if "10.10.0.2" in url:
+            return True
+        return False
+
+    with patch.object(wm, "check_health", side_effect=mock_health), \
+         patch("gateway.wake_manager.ping_host", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.probe_tcp", new=AsyncMock(return_value=False)):
+        # Checking 192.168.1.115 must return FALSE even though 10.10.0.2 is online!
+        assert await wm.is_server_alive("http://192.168.1.115:8200") is False
+
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_safe_power_toggle_disabled_always_wakes_node(wake_config, mqtt_config):
+    """
+    When safe_power_toggle is False (for idempotent power commands like Home Assistant,
+    Wake-on-LAN, smart plugs), physical power wake is never suppressed even if host probes pass.
+    """
+    wake_config.safe_power_toggle = False
+    wm = WakeManager(wake_config, mqtt_config)
+    wm.mqtt_publisher.publish_wake = AsyncMock(return_value=True)
+
+    # Backend is offline, but ping would have returned True
+    with patch.object(wm, "check_health", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.ping_host", new=AsyncMock(return_value=True)):
+        # Start ensure_awake in task
+        task = asyncio.create_task(
+            wm.ensure_awake("http://192.168.1.115:8200", wake_node=True)
+        )
+        await asyncio.sleep(0.02)
+        # publish_wake MUST be called because safe_power_toggle is False
+        wm.mqtt_publisher.publish_wake.assert_called_once()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_ping_check_disabled(wake_config, mqtt_config):
+    """When ping_check is False, ICMP ping is not executed and does not mark server as online."""
+    wake_config.ping_check = False
+    wm = WakeManager(wake_config, mqtt_config)
+
+    mock_ping = AsyncMock(return_value=True)
+    with patch.object(wm, "check_health", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.ping_host", new=mock_ping):
+        assert await wm.is_server_alive("http://192.168.1.115:8200") is False
+        mock_ping.assert_not_called()
+
+    await wm.close()
+
