@@ -5,14 +5,77 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
+import platform
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 import httpx
 
-from gateway.config import AutoShutdownConfig, MQTTConfig, WakeConfig
+from gateway.config import AutoShutdownConfig, MQTTConfig, WakeConfig, is_local_url
 from gateway.mqtt_client import MQTTPublisher
 
 logger = logging.getLogger("llama_gateway.wake_manager")
+
+
+async def ping_host(host: str, timeout: float = 1.0) -> bool:
+    """
+    Check if a host responds to ICMP ping asynchronously.
+    Supports Windows and Linux/macOS.
+    """
+    if not host or is_local_url(f"http://{host}"):
+        return True
+
+    system = platform.system().lower()
+    if system == "windows":
+        cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), host]
+    else:
+        timeout_sec = str(max(1, int(timeout)))
+        cmd = ["ping", "-c", "1", "-W", timeout_sec, host]
+
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        returncode = await asyncio.wait_for(proc.wait(), timeout=timeout + 0.5)
+        return returncode == 0
+    except (FileNotFoundError, PermissionError, asyncio.TimeoutError, OSError) as e:
+        logger.debug("Ping check failed or timed out for host %s: %s", host, e)
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return False
+    except Exception as e:
+        logger.debug("Unexpected error during ping check for %s: %s", host, e)
+        return False
+
+
+async def probe_tcp(host: str, port: int, timeout: float = 1.0) -> bool:
+    """
+    Check if a TCP port on a host responds.
+    If connection succeeds or is refused (RST received), the host OS network stack is active.
+    """
+    if not host or is_local_url(f"http://{host}"):
+        return True
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except ConnectionRefusedError:
+        # Host TCP stack actively rejected connection with RST -> Host machine is alive!
+        return True
+    except (asyncio.TimeoutError, OSError):
+        return False
+    except Exception:
+        return False
 
 
 class BackendWakeSession:
@@ -236,16 +299,29 @@ class WakeManager:
         """Trigger optional per-service custom wake (custom MQTT topic/payload or webhook)."""
         mqtt_topic = getattr(wake_config, "mqtt_topic", None)
         mqtt_payload = getattr(wake_config, "mqtt_payload", None)
+        mqtt_qos = getattr(wake_config, "mqtt_qos", None)
+        mqtt_retain = getattr(wake_config, "mqtt_retain", False)
         webhook_url = getattr(wake_config, "webhook_url", None)
 
         if mqtt_topic:
             payload = mqtt_payload or "wake"
-            logger.info("Publishing custom service MQTT wake to %s (payload=%s)", mqtt_topic, payload)
-            await self.mqtt_publisher.publish_message(
-                topic=mqtt_topic,
-                payload=payload,
-                action_name="custom service wake",
+            logger.info(
+                "Publishing custom service MQTT wake to %s (payload=%s, qos=%s, retain=%s)",
+                mqtt_topic,
+                payload,
+                mqtt_qos,
+                mqtt_retain,
             )
+            kwargs: Dict[str, Any] = {
+                "topic": mqtt_topic,
+                "payload": payload,
+                "action_name": "custom service wake",
+            }
+            if mqtt_qos is not None:
+                kwargs["qos"] = mqtt_qos
+            if mqtt_retain:
+                kwargs["retain"] = mqtt_retain
+            await self.mqtt_publisher.publish_message(**kwargs)
 
         if webhook_url:
             method = getattr(wake_config, "webhook_method", "POST").upper()
@@ -263,6 +339,87 @@ class WakeManager:
             except Exception as e:
                 logger.error("Error triggering wake webhook %s: %s", webhook_url, e)
 
+    async def is_server_alive(
+        self,
+        backend_url: Optional[str] = None,
+        health_path: str = "/health",
+        headers: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """
+        Check whether the physical server/node is already powered on.
+        Checks:
+        1. Whether the target backend or any monitored backend is reachable via HTTP health check.
+        2. Whether the host responds to ICMP ping (if enabled).
+        3. Whether the host responds to TCP port probe (if configured).
+        """
+        # Fast path 1: Check target backend
+        if backend_url:
+            is_up = await (
+                self.check_health(backend_url, health_path, headers=headers)
+                if headers is not None
+                else self.check_health(backend_url, health_path)
+            )
+            if is_up:
+                return True
+
+        # Fast path 2: Check any other monitored HTTP backend
+        if await self.is_node_alive():
+            return True
+
+        # Extract target host
+        host = None
+        if backend_url:
+            try:
+                parsed = urlparse(backend_url)
+                host = parsed.hostname
+            except Exception:
+                pass
+
+        if not host:
+            host = getattr(self.wake_config, "node_host", None)
+
+        if not host and self.monitored_backends:
+            try:
+                first_url = self.monitored_backends[0][0]
+                parsed = urlparse(first_url)
+                host = parsed.hostname
+            except Exception:
+                pass
+
+        if not host:
+            return False
+
+        if is_local_url(f"http://{host}"):
+            return True
+
+        # 2. Ping check
+        if getattr(self.wake_config, "ping_check", True):
+            is_pingable = await ping_host(
+                host,
+                timeout=min(1.5, self.wake_config.health_check_timeout),
+            )
+            if is_pingable:
+                logger.debug("Server host %s responded to ICMP ping (server is alive)", host)
+                return True
+
+        # 3. TCP probe if configured
+        tcp_port = getattr(self.wake_config, "tcp_probe_port", None)
+        if tcp_port:
+            is_tcp_alive = await probe_tcp(
+                host,
+                tcp_port,
+                timeout=min(1.5, self.wake_config.health_check_timeout),
+            )
+            if is_tcp_alive:
+                logger.debug(
+                    "Server host %s responded to TCP probe on port %d (server is alive)",
+                    host,
+                    tcp_port,
+                )
+                return True
+
+        return False
+
     async def _poll_until_ready(
         self,
         backend_url: str,
@@ -270,26 +427,70 @@ class WakeManager:
         session: BackendWakeSession,
         headers: Optional[Dict[str, str]] = None,
         is_local: bool = False,
+        wake_config: Optional[Any] = None,
+        needs_server_wake: bool = False,
     ) -> None:
         """Background worker that polls backend until healthy or max timeout expires."""
         logger.info(
-            "Starting wake-up polling loop for backend %s (max_timeout=%.1fs, interval=%.1fs, is_local=%s)",
+            "Starting wake-up polling loop for backend %s (max_timeout=%.1fs, interval=%.1fs, is_local=%s, needs_server_wake=%s)",
             backend_url,
             self.wake_config.max_timeout,
             self.wake_config.polling_interval,
             is_local,
+            needs_server_wake,
         )
-        initial_msg = (
-            "Service startup sequence dispatched. Waiting for local service..."
-            if is_local
-            else "Wake signal delivered. Waiting for server to boot..."
-        )
-        session.update_status("booting", initial_msg)
+        if needs_server_wake:
+            initial_msg = "Wake signal delivered. Waiting for server machine to boot..."
+            session.update_status("booting", initial_msg)
+        else:
+            initial_msg = (
+                "Service startup sequence dispatched. Waiting for local service..."
+                if is_local
+                else "Server is online. Waiting for service to start..."
+            )
+            session.update_status("starting_service", initial_msg)
 
         start = time.time()
+        has_custom_wake = wake_config is not None
+        custom_wake_sent = not (needs_server_wake and has_custom_wake)
+        custom_wake_retries = 1 if (custom_wake_sent and has_custom_wake) else 0
+        last_custom_wake_time = start if custom_wake_sent else 0.0
+
+        wake_delay = getattr(wake_config, "delay", 2.0) if wake_config else 2.0
+        retry_interval = getattr(wake_config, "retry_interval", 5.0) if wake_config else 5.0
+        max_retries = getattr(wake_config, "max_retries", 3) if wake_config else 3
+
         while time.time() - start < self.wake_config.max_timeout:
             await asyncio.sleep(self.wake_config.polling_interval)
             elapsed = time.time() - start
+
+            # Phase A: If server machine was sleeping and custom service wake hasn't been dispatched yet:
+            if needs_server_wake and not custom_wake_sent:
+                server_up = await self.is_server_alive(backend_url, health_path, headers=headers)
+                if not server_up:
+                    session.update_status("booting", f"Waiting for server machine to boot ({elapsed:.0f}s elapsed)...")
+                    continue
+
+                # Server machine is now online!
+                now = time.time()
+                self.node_online_since = now
+                session.update_status("server_ready", "Server machine is online. Initializing service startup...")
+                logger.info("Server machine for %s is now online after %.1fs. Preparing service wake...", backend_url, elapsed)
+
+                if wake_delay > 0:
+                    await asyncio.sleep(wake_delay)
+
+                if wake_config:
+                    logger.info("Triggering custom service wake for %s now that server machine is online", backend_url)
+                    await self._trigger_custom_wake(wake_config)
+                    custom_wake_retries = 1
+                    last_custom_wake_time = time.time()
+
+                custom_wake_sent = True
+                session.update_status("starting_service", "Service startup command dispatched. Waiting for service to start...")
+                continue
+
+            # Phase B: Server is online. Poll service health check:
             session.update_status("checking", f"Waiting for service to become ready ({elapsed:.0f}s elapsed)...")
             healthy = await (
                 self.check_health(backend_url, health_path, headers=headers)
@@ -305,6 +506,19 @@ class WakeManager:
                 async with self._lock:
                     self._active_sessions.pop(backend_url, None)
                 return
+
+            # Optional: Resend custom wake command if service takes longer and retries remain
+            if wake_config and custom_wake_sent and custom_wake_retries < max_retries:
+                if time.time() - last_custom_wake_time >= retry_interval:
+                    logger.info(
+                        "Service %s not ready yet. Resending startup command (retry %d/%d)...",
+                        backend_url,
+                        custom_wake_retries + 1,
+                        max_retries,
+                    )
+                    await self._trigger_custom_wake(wake_config)
+                    custom_wake_retries += 1
+                    last_custom_wake_time = time.time()
 
         elapsed = time.time() - start
         logger.error(
@@ -333,8 +547,13 @@ class WakeManager:
         """
         Ensure the backend is reachable.
         If not reachable, trigger wake (debounced) and wait for it to be ready.
-        If wake_node is True, publishes global MQTT node wake.
-        If wake_node is False, skips node wake and only triggers custom wake_config if set.
+        If wake_node is True:
+          - Checks if the server machine is already online.
+          - If already online: skips physical power wake signal (avoids powering off the server).
+          - If offline: sends physical power wake signal to ESP32 relay.
+        If wake_config is provided:
+          - If server is already online (or local service): triggers custom wake immediately.
+          - If server was sleeping: waits until machine boots, then triggers custom wake with retries.
         Returns (success, error_message).
         """
         # 1. Fast path: check if backend is already healthy
@@ -370,10 +589,16 @@ class WakeManager:
                 should_start_wake = True
 
         if should_start_wake:
+            server_already_up = False
             if wake_node:
+                server_already_up = await self.is_server_alive(backend_url, health_path, headers=headers)
+
+            needs_server_wake = wake_node and not server_already_up
+
+            if needs_server_wake:
                 session.update_status("waking", "Initiating remote node wake-up...")
                 # Publish standard MQTT wake message (global node wake)
-                logger.info("Publishing MQTT wake signal for backend: %s", backend_url)
+                logger.info("Server for %s is offline. Publishing MQTT wake signal...", backend_url)
                 mqtt_published = await self.mqtt_publisher.publish_wake()
                 if not mqtt_published:
                     err_detail = self.mqtt_publisher.last_error or "Unknown MQTT error"
@@ -382,6 +607,12 @@ class WakeManager:
                         backend_url,
                         err_detail,
                     )
+            elif wake_node and server_already_up:
+                logger.info(
+                    "Server machine for %s is ALREADY ONLINE. Skipping physical power wake signal to avoid powering off.",
+                    backend_url,
+                )
+                session.update_status("server_ready", "Server is online. Starting service...")
             else:
                 logger.info(
                     "Skipping physical node MQTT wake for %s (local service / wake_node=False)",
@@ -389,8 +620,9 @@ class WakeManager:
                 )
                 session.update_status("waking", "Initiating service startup...")
 
-            # Trigger optional per-service custom wake
-            if wake_config:
+            # If the server is already online (or local service), trigger custom wake immediately
+            if wake_config and not needs_server_wake:
+                logger.info("Server is already running; triggering custom service wake immediately for %s", backend_url)
                 await self._trigger_custom_wake(wake_config)
 
             # Launch polling background task
@@ -401,6 +633,8 @@ class WakeManager:
                     session,
                     headers=headers,
                     is_local=not wake_node,
+                    wake_config=wake_config,
+                    needs_server_wake=needs_server_wake,
                 )
             )
 
@@ -427,7 +661,11 @@ class WakeManager:
             backend_url = item[0]
             health_path = item[1]
             headers = item[2] if len(item) > 2 else None
-            tasks.append(self.check_health(backend_url, health_path, headers=headers))
+            tasks.append(
+                self.check_health(backend_url, health_path, headers=headers)
+                if headers is not None
+                else self.check_health(backend_url, health_path)
+            )
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return any(res is True for res in results)
 

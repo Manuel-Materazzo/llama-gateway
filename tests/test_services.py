@@ -372,3 +372,127 @@ def test_local_service_skips_physical_node_wake():
     # Verify custom service wake was triggered!
     wake_manager._trigger_custom_wake.assert_called_once()
 
+
+def test_remote_service_skips_physical_wake_when_server_already_online():
+    """
+    CRITICAL (Issue 1): If the physical server is ALREADY started/online (but the service is offline),
+    the gateway must NOT send the physical power wake signal (which would toggle power off).
+    It must trigger the custom service wake command directly.
+    """
+    cfg = AppConfig(
+        services=[
+            WebServiceConfig(
+                name="remotesvc",
+                backend_url="http://node:8080",
+                path_prefix="/remotesvc",
+                wake_node=True,
+                wake=WebServiceWakeConfig(
+                    mqtt_topic="nodes/remotesvc/start",
+                    mqtt_payload="START",
+                ),
+            )
+        ],
+        wake={"health_check_timeout": 0.05, "polling_interval": 0.05, "max_timeout": 0.2},
+    )
+    test_app = create_app(cfg)
+    client = TestClient(test_app)
+
+    wake_manager = test_app.state.wake_manager
+    wake_manager.check_health = AsyncMock(return_value=False)
+    # Server is detected as already online!
+    wake_manager.is_server_alive = AsyncMock(return_value=True)
+    wake_manager.mqtt_publisher.publish_wake = AsyncMock(return_value=True)
+    wake_manager._trigger_custom_wake = AsyncMock()
+
+    resp = client.post("/remotesvc/_gateway/wake")
+    assert resp.status_code == 200
+
+    # Wait briefly for background ensure_awake task to execute
+    import time
+    time.sleep(0.05)
+
+    # Physical power wake must NOT be called!
+    wake_manager.mqtt_publisher.publish_wake.assert_not_called()
+    # Custom service wake MUST be called immediately!
+    wake_manager._trigger_custom_wake.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_remote_service_delays_custom_wake_until_server_boots():
+    """
+    CRITICAL (Issue 2): When the server is sleeping and woken up, the custom MQTT message
+    must NOT be dispatched immediately (where it would fall on deaf ears).
+    Instead, it must be sent only AFTER the server machine comes online.
+    """
+    wake_cfg = WebServiceWakeConfig(
+        mqtt_topic="nodes/app/start",
+        mqtt_payload="BOOT_APP",
+        delay=0.01,
+        retry_interval=0.05,
+    )
+    svc = WebServiceConfig(
+        name="testapp",
+        backend_url="http://node:9000",
+        wake_node=True,
+        wake=wake_cfg,
+    )
+    app_cfg = AppConfig(
+        services=[svc],
+        wake={"health_check_timeout": 0.02, "polling_interval": 0.02, "max_timeout": 0.4},
+    )
+    test_app = create_app(app_cfg)
+    wm = test_app.state.wake_manager
+
+    # Initially server is down, then comes up on 2nd check
+    server_checks = [False, False, True]
+    async def mock_is_server_alive(*args, **kwargs):
+        if server_checks:
+            return server_checks.pop(0)
+        return True
+
+    # Service health initially down, then comes up after custom wake
+    service_checks = [False, False, False, True]
+    async def mock_check_health(*args, **kwargs):
+        if service_checks:
+            return service_checks.pop(0)
+        return True
+
+    wm.is_server_alive = mock_is_server_alive
+    wm.check_health = mock_check_health
+    wm.mqtt_publisher.publish_wake = AsyncMock(return_value=True)
+    wm._trigger_custom_wake = AsyncMock()
+
+    success, err = await wm.ensure_awake(
+        backend_url=svc.backend_url,
+        health_path=svc.health_path,
+        wake_config=svc.wake,
+        wake_node=True,
+    )
+
+    assert success is True
+    # Physical wake was published first to boot machine
+    wm.mqtt_publisher.publish_wake.assert_called_once()
+    # Custom service wake was triggered after server came online
+    assert wm._trigger_custom_wake.call_count >= 1
+
+    await wm.close()
+
+
+def test_custom_service_wake_retain_and_qos():
+    """Verify WebServiceWakeConfig supports mqtt_qos, mqtt_retain, and alias parsing."""
+    cfg = WebServiceWakeConfig(
+        mqtt_topic="nodes/svc/wake",
+        mqtt_payload="START",
+        qos=1,
+        retain=True,
+        startup_delay=3.5,
+        resend_interval=7.0,
+        retries=5,
+    )
+    assert cfg.mqtt_qos == 1
+    assert cfg.mqtt_retain is True
+    assert cfg.delay == 3.5
+    assert cfg.retry_interval == 7.0
+    assert cfg.max_retries == 5
+
+

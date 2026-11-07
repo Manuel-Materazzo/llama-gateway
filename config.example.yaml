@@ -106,11 +106,16 @@ services:
     title: "Jenkins CI/CD"
     description: "Automated continuous integration and build server"
     icon: "🏗️"
-    # Optional custom wake triggers (executed in addition to global MQTT wake):
+    # Optional custom wake triggers (executed when server is online):
     wake:
-      mqtt_topic: null                   # Optional custom MQTT topic for this service
-      mqtt_payload: null                 # Optional custom MQTT payload
+      mqtt_topic: null                   # Optional custom MQTT topic for this service (e.g. "nodes/jenkins/start")
+      mqtt_payload: null                 # Optional custom MQTT payload (e.g. "start")
+      mqtt_qos: 1                        # Optional QoS for custom MQTT wake (0 or 1)
+      mqtt_retain: false                 # Optional MQTT retain flag (broker delivers command immediately upon subscriber connect)
       webhook_url: null                  # Optional webhook URL to trigger wake (e.g. "http://supervisor:5000/start")
+      delay: 2.0                         # Seconds to wait after server machine comes online before sending startup command
+      retry_interval: 5.0                # Seconds between retry attempts while waiting for service to come online
+      max_retries: 3                     # Maximum retry attempts to dispatch the service startup command
 
   - name: "grafana"
     backend_url: "http://10.10.0.2:3000"
@@ -170,6 +175,9 @@ wake:
   max_timeout: 120.0          # Max seconds to wait for boot before returning HTTP 503
   keep_alive_interval: 5.0    # Seconds between SSE keep-alive comments (: keep-alive\n\n)
   estimated_boot_duration: 45.0 # Estimated seconds for server startup (progress tracking when return_progress: true)
+  ping_check: true            # Check ICMP ping before power toggle; skips power wake if server machine is already online
+  node_host: null             # Optional: explicit host/IP of the node (otherwise parsed from backend_url)
+  tcp_probe_port: null        # Optional: TCP port to probe on the host (e.g. 22 for SSH) to detect if server is already on
 
 # Auto-shutdown configuration (managed directly by the Gateway in cloud, zero-install on GPU node)
 # Automatically publishes an MQTT message to shut down the node after inactivity.

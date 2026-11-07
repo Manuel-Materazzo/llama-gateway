@@ -116,9 +116,11 @@ homelab/cloud environments.
   (`redirect_url` or `backend_url`).
 
 
-* **Customizable Wake Triggers**:
-* Uses the global node MQTT command by default; supports dedicated per-service MQTT topics/payloads or HTTP webhooks to
-  spin up isolated VMs or containers.
+* **Customizable Wake Triggers & Safe Power Signaling**:
+* **Safe Physical Power Wake**: Before dispatching a physical power button signal (MQTT relay toggle), the Gateway verifies whether the physical server is already online (via active backend checks, ICMP ping, or optional TCP port probe). If the server is already running, the power signal is safely suppressed to prevent accidental power-off cycles!
+* **Boot-Aware Service Dispatch**: When waking a sleeping server, custom service wake commands (MQTT topics or webhooks) are held until the server machine has completed booting and is reachable over the network.
+* **Connection Grace Delay & Retries**: Includes a configurable post-boot delay (`delay: 2.0s`) allowing MQTT daemons on the node to establish broker subscriptions, plus automatic retries (`retry_interval: 5.0s`, `max_retries: 3`) if the service takes time to start.
+* **MQTT Retain Support**: Supports `mqtt_retain: true` so the broker immediately delivers the startup command to daemons the moment they subscribe.
 
 
 * **Local Service and Container Support (Skip Physical Server Wake)**:
@@ -250,7 +252,12 @@ services:
     wake:
       mqtt_topic: null                   # Custom MQTT topic (falls back to global mqtt.topic if null)
       mqtt_payload: null                 # Custom MQTT payload
+      mqtt_qos: 1                        # Optional: MQTT QoS (0 or 1)
+      mqtt_retain: false                 # Optional: MQTT retain flag
       webhook_url: null                  # Optional: HTTP webhook (e.g., POST to start a container)
+      delay: 2.0                         # Seconds to wait after server machine is online before sending wake command
+      retry_interval: 5.0                # Seconds between retry attempts while waiting for service to come up
+      max_retries: 3                     # Maximum retry attempts to dispatch the service startup command
 
   - name: "grafana"
     backend_url: "http://10.10.0.2:3000"
@@ -289,6 +296,9 @@ wake:
   max_timeout: 120.0          # Max timeout before returning HTTP 503
   keep_alive_interval: 5.0    # SSE keep-alive comment interval
   estimated_boot_duration: 45.0 # Estimated boot seconds for progress calculations with return_progress: true
+  ping_check: true            # Check ICMP ping to verify if physical server is already online before toggling power
+  node_host: null             # Optional: explicit host/IP of the node (otherwise parsed from backend_url)
+  tcp_probe_port: null        # Optional: TCP port to probe on the host (e.g. 22 for SSH)
 
 # Centralized auto-shutdown managed by the Gateway via MQTT (recommended: zero footprint on GPU node)
 auto_shutdown:

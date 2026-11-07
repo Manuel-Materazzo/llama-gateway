@@ -9,9 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (curl for healthchecks)
+# Install system dependencies (curl for healthchecks, iputils-ping for ping checks)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

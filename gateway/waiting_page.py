@@ -610,10 +610,22 @@ def render_waiting_page(
             setStep(3);
             updateProgress(75, "Probing service health...");
             appendLog(data.message || "Probing health endpoint...");
+          }} else if (data.phase === "starting_service") {{
+            setStep(3);
+            updateProgress(65, "Starting service...");
+            appendLog(data.message || "Dispatching service startup command...");
+          }} else if (data.phase === "server_ready") {{
+            setStep(2);
+            updateProgress(50, "Server machine online...");
+            appendLog(data.message || "Server machine is online!");
           }} else if (data.phase === "booting") {{
             setStep(2);
-            updateProgress(40, "Node booting...");
+            updateProgress(35, "Node booting...");
             appendLog(data.message || "Waiting for machine to boot...");
+          }} else if (data.phase === "waking") {{
+            setStep(1);
+            updateProgress(20, "Initiating wake...");
+            appendLog(data.message || "Sending wake command...");
           }} else if (data.phase === "failed") {{
             onFailed(data.message);
           }}

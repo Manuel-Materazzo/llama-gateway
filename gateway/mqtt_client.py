@@ -26,20 +26,25 @@ class MQTTPublisher:
         self,
         topic: Optional[str] = None,
         payload: Optional[str] = None,
+        qos: Optional[int] = None,
+        retain: bool = False,
         action_name: str = "wake",
     ) -> bool:
         """Synchronously connects and publishes an MQTT message."""
         self.last_error = None
         target_topic = topic or self.config.topic
         target_payload = payload or self.config.payload
+        target_qos = qos if qos is not None else self.config.qos
 
         logger.info(
-            "Publishing %s command to MQTT broker at %s:%d (topic=%s, payload=%s, tls=%s)",
+            "Publishing %s command to MQTT broker at %s:%d (topic=%s, payload=%s, qos=%d, retain=%s, tls=%s)",
             action_name,
             self.config.host,
             self.config.port,
             target_topic,
             target_payload,
+            target_qos,
+            retain,
             self.config.use_tls,
         )
 
@@ -138,7 +143,8 @@ class MQTTPublisher:
             msg_info = client.publish(
                 topic=target_topic,
                 payload=target_payload,
-                qos=self.config.qos,
+                qos=target_qos,
+                retain=retain,
             )
 
             timeout = getattr(self.config, "timeout", 5.0) or 5.0
@@ -201,10 +207,12 @@ class MQTTPublisher:
         self,
         topic: Optional[str] = None,
         payload: Optional[str] = None,
+        qos: Optional[int] = None,
+        retain: bool = False,
         action_name: str = "wake",
     ) -> bool:
         """Asynchronously publishes an MQTT message in a worker thread."""
-        return await asyncio.to_thread(self._publish_sync, topic, payload, action_name)
+        return await asyncio.to_thread(self._publish_sync, topic, payload, qos, retain, action_name)
 
     async def publish_wake(self) -> bool:
         """Asynchronously publishes the wake message in a worker thread."""
@@ -214,6 +222,8 @@ class MQTTPublisher:
         self,
         topic: Optional[str] = None,
         payload: Optional[str] = None,
+        qos: Optional[int] = None,
+        retain: bool = False,
     ) -> bool:
         """Asynchronously publishes the shutdown message in a worker thread."""
-        return await self.publish_message(topic=topic, payload=payload, action_name="shutdown")
+        return await self.publish_message(topic=topic, payload=payload, qos=qos, retain=retain, action_name="shutdown")

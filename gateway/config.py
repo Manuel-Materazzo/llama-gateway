@@ -105,10 +105,35 @@ class WebServiceWakeConfig(BaseModel):
     """Custom wake configuration for an individual web or API service."""
     mqtt_topic: Optional[str] = None
     mqtt_payload: Optional[str] = None
+    mqtt_qos: Optional[int] = None
+    mqtt_retain: bool = False
     webhook_url: Optional[str] = None
     webhook_method: str = "POST"
     webhook_headers: Dict[str, str] = Field(default_factory=dict)
     webhook_body: Optional[str] = None
+    delay: float = 2.0  # Seconds to wait after server machine is online before sending wake command
+    retry_interval: float = 5.0  # Seconds between retry attempts while waiting for service to come up
+    max_retries: int = 3  # Maximum number of times to send the service startup command
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_wake_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "wake_delay" in d and "delay" not in d:
+                d["delay"] = d["wake_delay"]
+            elif "startup_delay" in d and "delay" not in d:
+                d["delay"] = d["startup_delay"]
+            if "retain" in d and "mqtt_retain" not in d:
+                d["mqtt_retain"] = d["retain"]
+            if "qos" in d and "mqtt_qos" not in d:
+                d["mqtt_qos"] = d["qos"]
+            if "resend_interval" in d and "retry_interval" not in d:
+                d["retry_interval"] = d["resend_interval"]
+            if "retries" in d and "max_retries" not in d:
+                d["max_retries"] = d["retries"]
+            return d
+        return data
 
 
 class WebServiceConfig(BaseModel):
@@ -244,6 +269,21 @@ class WakeConfig(BaseModel):
     max_timeout: float = 120.0
     keep_alive_interval: float = 5.0
     estimated_boot_duration: float = 45.0
+    ping_check: bool = True  # Check if host responds to ICMP ping before sending physical power wake
+    node_host: Optional[str] = None  # Optional explicit host/IP of the node (otherwise parsed from backend_url)
+    tcp_probe_port: Optional[int] = None  # Optional TCP port to probe on the host (e.g. 22 for SSH)
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_wake_timing_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "check_ping" in d and "ping_check" not in d:
+                d["ping_check"] = d["check_ping"]
+            if "host" in d and "node_host" not in d:
+                d["node_host"] = d["host"]
+            return d
+        return data
 
 
 class AutoShutdownConfig(BaseModel):

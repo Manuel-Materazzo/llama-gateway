@@ -115,3 +115,34 @@ async def test_activity_recording(wake_config, mqtt_config):
     assert status["inactivity_seconds"] >= 0.0
 
     await wm.close()
+
+
+@pytest.mark.asyncio
+async def test_is_server_alive_detection(wake_config, mqtt_config):
+    """Test is_server_alive checks backends, ICMP ping, and TCP probe."""
+    wm = WakeManager(wake_config, mqtt_config, monitored_backends=[("http://node:8080", "/health")])
+
+    # 1. When backend is healthy -> True
+    with patch.object(wm, "check_health", new=AsyncMock(return_value=True)):
+        assert await wm.is_server_alive("http://node:8080") is True
+
+    # 2. When backend is offline but ping succeeds -> True
+    with patch.object(wm, "check_health", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.ping_host", new=AsyncMock(return_value=True)):
+        assert await wm.is_server_alive("http://node:8080") is True
+
+    # 3. When backend is offline and ping fails, but TCP probe succeeds -> True
+    wm.wake_config.tcp_probe_port = 22
+    with patch.object(wm, "check_health", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.ping_host", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.probe_tcp", new=AsyncMock(return_value=True)):
+        assert await wm.is_server_alive("http://node:8080") is True
+
+    # 4. When everything fails -> False
+    with patch.object(wm, "check_health", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.ping_host", new=AsyncMock(return_value=False)), \
+         patch("gateway.wake_manager.probe_tcp", new=AsyncMock(return_value=False)):
+        assert await wm.is_server_alive("http://node:8080") is False
+
+    await wm.close()
+
