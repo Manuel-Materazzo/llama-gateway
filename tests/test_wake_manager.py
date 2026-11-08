@@ -220,3 +220,45 @@ async def test_ping_check_disabled(wake_config, mqtt_config):
 
     await wm.close()
 
+
+@pytest.mark.asyncio
+async def test_ping_host_rejects_destination_unreachable_even_with_exit_code_zero():
+    """
+    On Windows / some routers, 'Reply from <gateway>: Destination host unreachable'
+    is counted as a received ICMP packet and returns exit code 0.
+    Ensure ping_host inspects the output and returns False.
+    """
+    from gateway.wake_manager import ping_host
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(
+        return_value=(
+            b"Pinging 192.168.1.115 with 32 bytes of data:\nReply from 192.168.1.2: Destination host unreachable.\n",
+            b"",
+        )
+    )
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        result = await ping_host("192.168.1.115")
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_ping_host_success_with_ttl():
+    """A genuine ICMP Echo Reply containing TTL returns True."""
+    from gateway.wake_manager import ping_host
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(
+        return_value=(
+            b"Reply from 192.168.1.115: bytes=32 time=1ms TTL=64\n",
+            b"",
+        )
+    )
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        result = await ping_host("192.168.1.115")
+        assert result is True
+

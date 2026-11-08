@@ -21,6 +21,9 @@ async def ping_host(host: str, timeout: float = 1.0) -> bool:
     """
     Check if a host responds to ICMP ping asynchronously.
     Supports Windows and Linux/macOS.
+    Captures stdout/stderr to protect against false positives where
+    intermediate gateways reply with 'Destination host unreachable'
+    (which Windows ping reports as exit code 0 / 0% loss).
     """
     if not host or is_local_url(f"http://{host}"):
         return True
@@ -36,11 +39,43 @@ async def ping_host(host: str, timeout: float = 1.0) -> bool:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        returncode = await asyncio.wait_for(proc.wait(), timeout=timeout + 0.5)
-        return returncode == 0
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout + 1.0,
+        )
+        if proc.returncode != 0:
+            return False
+
+        out = (stdout_bytes.decode(errors="ignore") + stderr_bytes.decode(errors="ignore")).lower()
+
+        # Reject any error or unreachable messages
+        fail_keywords = (
+            "unreachable",
+            "irraggiungibile",
+            "timed out",
+            "timed_out",
+            "scaduta",
+            "100% loss",
+            "100% packet loss",
+            "100% persi",
+            "0 received",
+            "0 packets received",
+            "unknown host",
+            "could not find host",
+            "general failure",
+            "richiesta non valida",
+        )
+        if any(kw in out for kw in fail_keywords):
+            return False
+
+        # Positive indicator: valid ICMP Echo Reply packets contain 'ttl=' (or 'ttl ')
+        if "ttl=" not in out and "ttl " not in out:
+            return False
+
+        return True
     except (FileNotFoundError, PermissionError, asyncio.TimeoutError, OSError) as e:
         logger.debug("Ping check failed or timed out for host %s: %s", host, e)
         if proc and proc.returncode is None:
